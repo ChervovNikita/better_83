@@ -1,10 +1,10 @@
 import copy
+import time
 from abc import ABC, abstractmethod
 
 import bittensor as bt
 from common.base import base_version
 from common.utils.config import add_args, check_config, config
-from common.utils.misc import ttl_get_block
 
 
 class BaseNeuron(ABC):
@@ -35,14 +35,27 @@ class BaseNeuron(ABC):
 
     @property
     def block(self):
-        return ttl_get_block(self)
+        block_cache_ttl = self.config.neuron.block_cache_ttl
+        if block_cache_ttl <= 0:
+            return self.subtensor.get_current_block()
+
+        now = time.time()
+        if (
+            not hasattr(self, "_cached_block")
+            or now - self._cached_block_time >= block_cache_ttl
+        ):
+            self._cached_block = self.subtensor.get_current_block()
+            self._cached_block_time = now
+        return self._cached_block
 
     def __init__(self, config=None):
         base_config = copy.deepcopy(config or BaseNeuron.config())
         self.config = self.config()
         self.config.merge(base_config)
         self.check_config(self.config)
-
+        wallet_cls = getattr(bt, "wallet", None) or getattr(bt, "Wallet", None)
+        subtensor_cls = getattr(bt, "subtensor", None) or getattr(bt, "Subtensor", None)
+        
         # Set up logging with the provided configuration.
         bt.logging.set_config(config=self.config.logging)
 
@@ -56,8 +69,8 @@ class BaseNeuron(ABC):
         # These are core Bittensor classes to interact with the network.
         bt.logging.info("Setting up bittensor objects.")
 
-        self.wallet = bt.wallet(config=self.config)
-        self.subtensor = bt.subtensor(
+        self.wallet = wallet_cls(config=self.config)
+        self.subtensor = subtensor_cls(
             network=self.config.subtensor.network, config=self.config
         )
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
@@ -132,14 +145,6 @@ class BaseNeuron(ABC):
         return True
 
     def should_set_weights(self) -> bool:
-        # Don't set weights on initialization.
-        if self.step == 0:
-            return False
-
-        # Don't set weights until after 100 steps.
-        if (self.step - self.init_step) < 100:
-            return False
-
         if self.config.neuron.disable_set_weights:
             return False
 
@@ -147,8 +152,21 @@ class BaseNeuron(ABC):
         if self.neuron_type == "MinerNeuron":
             return False
 
+        # Don't set weights on initialization.
+        if self.step == 0:
+            return False
+
+        # Don't set weights until enough startup steps have passed.
+        if (
+            self.step - self.init_step
+        ) < self.config.neuron.min_steps_before_set_weights:
+            return False
+
         # Check if enough epoch blocks have elapsed since the last epoch.
         if (self.block - self.last_set_weight) < (self.config.neuron.epoch_length / 2):
+            bt.logging.debug(
+                f"Not setting weights because only {self.block - self.last_set_weight} blocks have elapsed since the last time weights were set, which is less than half of the configured epoch length of {self.config.neuron.epoch_length} blocks."
+            )
             return False
 
         # Ensure it's past the midpoint of the current epoch.
@@ -156,6 +174,9 @@ class BaseNeuron(ABC):
             netuid=self.config.netuid, block=self.block
         )
         if subnet_info.blocks_since_epoch * 2 < self.config.neuron.epoch_length:
+            bt.logging.debug(
+                f"Not setting weights because we are only {subnet_info.blocks_since_epoch} blocks into the current epoch, which is less than half of the configured epoch length of {self.config.neuron.epoch_length} blocks."
+            )
             return False
         return True
 
