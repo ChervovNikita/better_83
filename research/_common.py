@@ -20,6 +20,25 @@ KEYS = ["_step", "uuid", "number_of_nodes", "difficulty", "time_limit",
         "encoded_matrix", "miner_ans", "miner_uids", "miner_coldkeys",
         "miner_optimality", "miner_diversity", "miner_rewards"]
 
+# wandb >= 0.20 reroutes Run.scan_history through a service API that pulls the
+# whole run history before yielding anything. Our runs hold ~23k steps of
+# adjacency lists, so it hangs indefinitely — measured against 18 rows/s on
+# 0.17.0. Fail loudly at startup instead of letting cron time out forever.
+WANDB_MAX_MINOR = (0, 20)
+
+
+def check_wandb_version():
+    import wandb
+    try:
+        major, minor = (int(x) for x in wandb.__version__.split(".")[:2])
+    except ValueError:
+        return
+    if (major, minor) >= WANDB_MAX_MINOR:
+        raise RuntimeError(
+            f"wandb {wandb.__version__} is too new for scan_history: it downloads "
+            f"the entire run history and never returns. Install the pin: "
+            f"pip install -r research/requirements.txt")
+
 
 def popcount_edges(b92, n):
     """Edge count read straight off the base92 payload, no n x n matrix."""

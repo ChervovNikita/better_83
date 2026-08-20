@@ -1,0 +1,7 @@
+# wandb>=0.20 routes Run.scan_history through a service API that downloads the
+# ENTIRE run history before yielding a row (use_cache=True by default, and
+# use_cache=False is no faster). SN83 runs hold ~23k steps each carrying a full
+# adjacency_list, so that call never returns. 0.17.0 keeps the paged,
+# range-limited HistoryScan path: measured ~18 rows/s against a hard hang.
+wandb==0.17.0
+numpy>=1.24,<2

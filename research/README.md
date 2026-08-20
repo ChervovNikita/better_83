@@ -33,7 +33,8 @@ Two facts drive everything here:
 | `eval_harness.py` | run a solver, replay scoring, report reward + implied emission |
 | `status.py` | pipeline health; exit 1 if stale or errored |
 | `solver.py` | baseline local search (mean reward 1.755 — the dead zone) |
-| `setup_server.sh` | provision a box and install the 5-minute cron |
+| `setup_server.sh` | provision a box (venv + cron) |
+| `requirements.txt` | **pinned** deps — see the wandb note below |
 | `data/` | shards, state and logs (gitignored) |
 
 ## Dataset schema
@@ -95,3 +96,27 @@ Two gotchas worth knowing: `scan_history` repeats roughly one row per page at
 page boundaries (deduplicate by `uuid`), and requesting `adjacency_list` makes
 the history endpoint return HTTP 500 — `matrix_b92` is the same graph in a tenth
 of the bytes.
+
+## The wandb pin is load-bearing
+
+`wandb>=0.20` reroutes `Run.scan_history` through a service API that downloads
+the *entire* run history before yielding a row. `use_cache=False` does not avoid
+it. SN83 runs hold ~23,000 steps each carrying a full `adjacency_list`, so on
+0.28.2 the call simply never returns — a 200-step incremental fetch that takes
+21s on the pin timed out at 400s. `requirements.txt` pins `wandb==0.17.0`, and
+`_common.check_wandb_version()` fails loudly at startup if something newer gets
+installed, so cron logs an error instead of hanging forever.
+
+Server deployment uses a dedicated venv at `<repo>/.venv` so the pin cannot
+disturb anything else on the host.
+
+## Deployment
+
+```bash
+git clone <repo> && cd <repo>
+WANDB_API_KEY=... bash research/setup_server.sh
+```
+
+That creates the venv, writes `~/.netrc` (0600), installs and starts cron, adds
+a `*/5 * * * *` job, runs a first backfill, and prints the health report. Re-run
+it after a `git pull`; it is idempotent.

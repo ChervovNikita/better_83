@@ -10,14 +10,18 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESEARCH="$REPO/research"
 DATA="$RESEARCH/data"
-PY="$(command -v python3)"
+VENV="$REPO/.venv"
 
-echo "==> repo:   $REPO"
-echo "==> python: $PY ($($PY --version))"
+echo "==> repo: $REPO"
 
-echo "==> python dependencies"
-"$PY" -m pip install --quiet --upgrade "wandb>=0.16" "numpy>=1.24" 2>&1 | tail -2 || true
+# A dedicated venv, so the pinned wandb cannot disturb anything else on the box.
+echo "==> virtualenv + pinned dependencies"
+[ -d "$VENV" ] || python3 -m venv "$VENV"
+PY="$VENV/bin/python"
+"$PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+"$PY" -m pip install --quiet -r "$RESEARCH/requirements.txt" 2>&1 | tail -2 || true
 "$PY" -c "import wandb, numpy; print('    wandb', wandb.__version__, '| numpy', numpy.__version__)"
+"$PY" -c "import sys; sys.path.insert(0, '$RESEARCH'); from _common import check_wandb_version; check_wandb_version(); print('    version guard: ok')"
 
 echo "==> W&B credentials"
 if [ -n "${WANDB_API_KEY:-}" ]; then

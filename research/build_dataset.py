@@ -16,7 +16,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from _common import KEYS, PROJECT, discover_runs, row_to_record
+from _common import KEYS, PROJECT, check_wandb_version, discover_runs, row_to_record
 
 _lock = threading.Lock()
 
@@ -69,6 +69,7 @@ def main():
     args = ap.parse_args()
 
     import wandb
+    check_wandb_version()
     api = wandb.Api(timeout=180)
     runs = discover_runs(api, args.versions)
     runs.reverse()                      # newest first

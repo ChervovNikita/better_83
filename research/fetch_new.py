@@ -24,8 +24,8 @@ import sys
 import time
 import traceback
 
-from _common import (DATA_DIR, DEFAULT_VERSIONS, KEYS, PROJECT, discover_runs,
-                     load_json, row_to_record, save_json)
+from _common import (DATA_DIR, DEFAULT_VERSIONS, KEYS, PROJECT, check_wandb_version,
+                     discover_runs, load_json, row_to_record, save_json)
 
 STATE = os.path.join(DATA_DIR, "state.json")
 STATUS = os.path.join(DATA_DIR, "status.json")
@@ -119,6 +119,7 @@ def main():
     status = load_json(STATUS, {})
     try:
         import wandb
+        check_wandb_version()
         api = wandb.Api(timeout=180)
         state = load_json(STATE, {})
         runs = discover_runs(api, args.versions)
