@@ -33,7 +33,10 @@ Two facts drive everything here:
 | `eval_harness.py` | run a solver, replay scoring, report reward + implied emission |
 | `status.py` | pipeline health; exit 1 if stale or errored |
 | `solver.py` | baseline local search (mean reward 1.755 — the dead zone) |
-| `setup_server.sh` | provision a box (venv + cron) |
+| `make_splits.py` | stratified train / validation split, sized by solver budget |
+| `score_submission.py` | run a candidate solver on validation and score it |
+| `AGENT.md` | the brief handed to whoever builds the solver |
+| `setup_server.sh` | provision a box (venv; cron optional) |
 | `requirements.txt` | **pinned** deps — see the wandb note below |
 | `data/` | shards, state and logs (gitignored) |
 
@@ -75,7 +78,24 @@ python3 eval_harness.py bench.jsonl --solver mysolver:run --time-limit 7.5
 
 # is the pipeline alive?
 python3 status.py
+
+# build the splits, then score a solver against the withheld labels
+python3 make_splits.py --budget 600
+python3 score_submission.py --solver mymodule:solve
 ```
+
+## Splits
+
+`make_splits.py` sizes validation by *solver budget* rather than row count: it
+draws instances until their deadlines sum to `--budget` seconds (default 600, so
+one validation pass costs about ten minutes). Sampling is stratified by
+(time_limit, |V| bucket) with largest-remainder proportional allocation, so the
+validation mix reproduces the pool rather than merely matching it in
+expectation; `manifest.json` records the side-by-side check.
+
+The split is three files: `train.jsonl` with labels included, `val_problems.jsonl`
+with graphs and deadlines but **no** labels, and `val_labels.jsonl`, which only
+`score_submission.py` reads. See `AGENT.md` for the brief this is built around.
 
 A solver is any `f(A, time_limit) -> list[int]`, with `A` an `n×n` uint8 numpy
 adjacency matrix. It must return a **maximal** clique — one that can still be
@@ -120,6 +140,10 @@ WANDB_API_KEY=... bash research/setup_server.sh
 That creates the venv, writes `~/.netrc` (0600), installs and starts cron, adds
 a `*/5 * * * *` job, runs a first backfill, and prints the health report. Re-run
 it after a `git pull`; it is idempotent.
+
+The cron job only matters while you are accumulating history. Once the corpus is
+large enough, drop it — `crontab -l | grep -v sn83-fetch | crontab -` — and
+refresh on demand with `fetch_new.py` or a one-shot `build_dataset.py`.
 
 ### If the box restarts
 
