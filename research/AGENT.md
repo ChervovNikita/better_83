@@ -50,9 +50,15 @@ non-maximal answer throws away the whole task.
 | `data/splits/val_labels.jsonl` | **do not open.** The withheld answers, read only by the scorer. |
 | `data/splits/manifest.json` | split sizes and the distribution check |
 
-Validation is stratified by (deadline, |V| bucket) to reproduce the live problem
-mix, and sized so that one full pass costs about **10 minutes** of solve time.
-Run it as often as you like.
+Validation is stratified by (deadline, problem tier) to reproduce the live
+problem mix, and sized so that one full pass costs about **10 minutes** of solve
+time. Run it as often as you like.
+
+Ten minutes buys roughly 40 tasks, so a single run resolves the parity rate to
+about ±2.4 points — fine for steering, too coarse to call a small improvement
+real. Before a go/no-go decision, rebuild with a bigger budget
+(`python3 make_splits.py --budget 3600 --seed <new>`) and re-score; the seed
+change also guards against having quietly tuned on one particular draw.
 
 Every record:
 

@@ -5,9 +5,9 @@ The validation set is sized by *solver budget*, not by row count: instances are
 drawn until their time limits sum to roughly --budget seconds (default 600, so
 one full validation pass costs about ten minutes of wall clock).
 
-Sampling is stratified by (time_limit, |V| bucket) with proportional allocation
-and largest-remainder rounding, so the validation mix reproduces the source
-distribution rather than merely matching it in expectation.
+Sampling is stratified by (time_limit, problem tier) with proportional
+allocation and largest-remainder rounding, so the validation mix reproduces the
+source distribution rather than merely matching it in expectation.
 
 Three files come out of it:
 
@@ -59,8 +59,18 @@ def load_pool(patterns):
     return list(pool.values()), dupes
 
 
+def tier(rec):
+    """The problem tier, not a size bucket.
+
+    Tiers are 290-300 / 490-500 / 690-700 / 890-900 vertices, so `n // 100`
+    splits each one in two and strands the boundary value (n=300 lands apart
+    from n=299). `difficulty` maps 1:1 onto the tiers, so use it directly.
+    """
+    return rec["difficulty"]
+
+
 def stratum(rec):
-    return (rec["time_limit"], rec["n"] // 100 * 100)
+    return (rec["time_limit"], tier(rec))
 
 
 def allocate(pool, n_val):
@@ -147,9 +157,9 @@ def main():
             "pool": dist(pool, lambda r: r["time_limit"]),
             "val": dist(val, lambda r: r["time_limit"]),
         },
-        "distribution_vertex_bucket_pct": {
-            "pool": dist(pool, lambda r: r["n"] // 100 * 100),
-            "val": dist(val, lambda r: r["n"] // 100 * 100),
+        "distribution_vertex_tier_pct": {
+            "pool": dist(pool, lambda r: (r["n"] - 1) // 100 * 100 + 100),
+            "val": dist(val, lambda r: (r["n"] - 1) // 100 * 100 + 100),
         },
         "distribution_difficulty_pct": {
             "pool": dist(pool, lambda r: r["difficulty"]),
@@ -162,7 +172,7 @@ def main():
           f"val budget {val_seconds:.0f}s ({val_seconds/60:.1f} min)")
     print("\ndistribution check (pool % vs val %):")
     for name, block in (("time limit", manifest["distribution_time_limit_pct"]),
-                        ("|V| bucket", manifest["distribution_vertex_bucket_pct"]),
+                        ("|V| tier (<=)", manifest["distribution_vertex_tier_pct"]),
                         ("difficulty", manifest["distribution_difficulty_pct"])):
         print(f"  {name}:")
         for k in sorted(block["pool"], key=lambda x: float(x)):
