@@ -120,3 +120,17 @@ WANDB_API_KEY=... bash research/setup_server.sh
 That creates the venv, writes `~/.netrc` (0600), installs and starts cron, adds
 a `*/5 * * * *` job, runs a first backfill, and prints the health report. Re-run
 it after a `git pull`; it is idempotent.
+
+### If the box restarts
+
+The target is a container with no init system, so `cron` is started directly by
+`setup_server.sh` rather than by systemd. A pod restart therefore leaves the
+crontab intact but the daemon stopped, and fetches silently stop. Recovery is
+one idempotent command:
+
+```bash
+cd /workspace/better_83 && git pull && WANDB_API_KEY=... bash research/setup_server.sh
+```
+
+`status.py` exits non-zero once the last successful fetch is more than 20
+minutes old, so it is safe to use as an external liveness check.
