@@ -14,7 +14,8 @@ minus the best rival's size is `>= 0`.
 parity rate = (tasks where delta >= 0) / (all tasks)
 ```
 
-Milestones: **60%** means the approach works. **90%** means you are close.
+Milestones: the shipped baseline sits at **4.8%**. **60%** means the approach
+works. **90%** means you are close.
 **99%+** is the real bar, and here is why it has to be that high — on chain,
 validator weights amplify *rank*, not reward. A solver that trails the field by
 one vertex on most rounds does not earn a bit less; it earns nothing. There is
@@ -145,8 +146,10 @@ Measured against the live field, so you can skip these dead ends:
   local search was given 1x, 4x and 10x the deadline on three instances and
   gained *exactly zero* vertices each time — 431k iterations to 4.27M, same
   answer. Plateau search saturates. The gap is algorithmic.
-- **The baseline in `solver.py` is not competitive** and is there only as a
-  regression floor: ~17% parity, mean reward 1.755, which earns nothing.
+- **The baseline in `solver.py` scores 4.8% parity** on the 42-task validation
+  set (2 matched, 5 at -1, 16 at -2, and a tail out to -7; mean delta -2.71).
+  It is there as a regression floor, not a starting point — beating it is easy
+  and means nothing on its own.
 - **`networkx.approximation.max_clique`, which the subnet ships as its example
   miner, is far worse still.**
 
