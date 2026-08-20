@@ -170,3 +170,7 @@ bittensor_test/
 
 # act secrets
 .secrets
+
+# SN83 research pipeline
+research/data/
+research/*.jsonl
