@@ -80,8 +80,9 @@ python3 eval_harness.py bench.jsonl --solver mysolver:run --time-limit 7.5
 python3 status.py
 
 # build the splits, then score a solver against the withheld labels
-python3 make_splits.py --budget 600
-python3 score_submission.py --solver mymodule:solve
+python3 make_splits.py --budget 600 --bigger-n 500
+python3 score_submission.py --solver mymodule:solve                     # val, ~10 min
+python3 score_submission.py --solver mymodule:solve --split bigger_val  # audit, ~2 h
 ```
 
 ## Splits
@@ -93,9 +94,12 @@ one validation pass costs about ten minutes). Sampling is stratified by
 validation mix reproduces the pool rather than merely matching it in
 expectation; `manifest.json` records the side-by-side check.
 
-The split is three files: `train.jsonl` with labels included, `val_problems.jsonl`
-with graphs and deadlines but **no** labels, and `val_labels.jsonl`, which only
-`score_submission.py` reads. See `AGENT.md` for the brief this is built around.
+Two held-out sets are drawn, disjoint from train and from each other: `val`
+(~10 min a pass, the steering signal) and `bigger_val` (500 instances, ~2 h, the
+rarely-run audit). Each is split into `*_problems.jsonl` — graphs and deadlines,
+**no** labels — and `*_labels.jsonl`, which only `score_submission.py` reads.
+`train.jsonl` keeps full labels and is unrestricted. See `AGENT.md` for the
+brief this is built around.
 
 A solver is any `f(A, time_limit) -> list[int]`, with `A` an `n×n` uint8 numpy
 adjacency matrix. It must return a **maximal** clique — one that can still be

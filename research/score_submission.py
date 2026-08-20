@@ -79,8 +79,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--solver", help="module:function, imported and timed here")
     ap.add_argument("--submission", help="precomputed answers as JSONL")
-    ap.add_argument("--problems", default=os.path.join(SPLITS, "val_problems.jsonl"))
-    ap.add_argument("--labels", default=os.path.join(SPLITS, "val_labels.jsonl"))
+    ap.add_argument("--split", default="val", choices=["val", "bigger_val"],
+                    help="val is the ~10 min steering set; bigger_val is the "
+                         "multi-hour audit set — run it rarely")
+    ap.add_argument("--problems", help="override the split's problem file")
+    ap.add_argument("--labels", help="override the split's label file")
     ap.add_argument("--time-scale", type=float, default=0.88,
                     help="fraction of each deadline the solver may use; the rest is "
                          "network headroom a live miner needs")
@@ -94,8 +97,10 @@ def main():
         print("give exactly one of --solver or --submission", file=sys.stderr)
         return 2
 
-    problems = load_jsonl(args.problems)
-    labels = {r["uuid"]: r for r in load_jsonl(args.labels)}
+    problems_path = args.problems or os.path.join(SPLITS, f"{args.split}_problems.jsonl")
+    labels_path = args.labels or os.path.join(SPLITS, f"{args.split}_labels.jsonl")
+    problems = load_jsonl(problems_path)
+    labels = {r["uuid"]: r for r in load_jsonl(labels_path)}
     if args.limit:
         problems = problems[:args.limit]
     missing = [p["uuid"] for p in problems if p["uuid"] not in labels]
@@ -112,7 +117,7 @@ def main():
         solve = getattr(importlib.import_module(mod), fn)
 
     budget = sum(p["time_limit"] for p in problems)
-    print(f"scoring {len(problems)} validation tasks "
+    print(f"scoring {len(problems)} tasks from '{args.split}' "
           f"({budget:.0f}s of deadline, ~{budget/60:.1f} min)\n", file=sys.stderr)
 
     rows, t_start = [], time.time()
@@ -143,40 +148,31 @@ def main():
     failed = [r for r in rows if not r["ok"]]
     deltas = [r["delta"] for r in solved]
     n = len(rows)
-
-    print("\n" + "=" * 62)
-    print("SCORE vs BEST RIVAL")
-    print("=" * 62)
     matched = sum(1 for d in deltas if d == 0)
     beat = sum(1 for d in deltas if d > 0)
-    print(f"  tasks                    {n}")
-    print(f"  matched or beat rivals   {matched + beat:>4}   ({(matched+beat)/n:6.1%})   <-- the target")
-    print(f"  strictly behind          {sum(1 for d in deltas if d < 0):>4}   "
-          f"({sum(1 for d in deltas if d < 0)/n:6.1%})")
-    print(f"  invalid / no answer      {len(failed):>4}   ({len(failed)/n:6.1%})")
-    if deltas:
-        print(f"  mean size delta          {np.mean(deltas):+.3f} vertices")
-        print(f"  median size delta        {np.median(deltas):+.1f}")
-    print(f"  total solve time         {sum(r['elapsed'] for r in rows):.0f}s "
-          f"of {budget:.0f}s allowed"
-          + (f"   ({sum(1 for r in rows if r['over'])} over budget)"
-             if any(r["over"] for r in rows) else ""))
 
-    print("\n" + "-" * 62)
-    print("DELTA DISTRIBUTION   (our clique size − best rival's)")
-    print("-" * 62)
+    print("\n" + "=" * 62)
+    print("SCORE vs BEST RIVAL   (our clique size - best rival's)")
+    print("=" * 62)
+    print(f"  tasks {n}\n")
     hist = collections.Counter(deltas)
-    span = sorted(hist) if hist else []
-    for d in sorted(span, reverse=True):
-        cnt = hist[d]
-        tag = "same as best rival" if d == 0 else ("ahead" if d > 0 else "behind")
-        bar = "#" * max(1, round(40 * cnt / n))
-        print(f"  {d:+3d}  {cnt:>4}  {cnt/n:6.1%}  {bar} {tag}")
+    if hist:
+        hi = max(max(hist), 1)          # always show at least +1, so "never ahead" is visible
+        lo = min(hist)
+        for d in range(hi, lo - 1, -1):
+            cnt = hist.get(d, 0)
+            bar = "#" * round(46 * cnt / n)
+            tag = "  <-- same as best rival" if d == 0 else ""
+            label = "0" if d == 0 else f"{d:+d}"
+            print(f"  {label:>4}  {cnt:>5}  {cnt/n:6.1%}  {bar}{tag}")
     if failed:
-        bar = "#" * max(1, round(40 * len(failed) / n))
-        print(f"  inv  {len(failed):>4}  {len(failed)/n:6.1%}  {bar} invalid")
+        bar = "#" * round(46 * len(failed) / n)
+        print(f"  {'inv':>4}  {len(failed):>5}  {len(failed)/n:6.1%}  {bar}  <-- invalid, scores zero")
         for why, c in collections.Counter(r["why"] for r in failed).most_common(4):
-            print(f"         {c:>4}  {why}")
+            print(f"                        {c:>4}  {why}")
+    print(f"\n  total solve time  {sum(r['elapsed'] for r in rows):.0f}s of {budget:.0f}s allowed"
+          + (f"   ({sum(1 for r in rows if r['over'])} OVER BUDGET)"
+             if any(r["over"] for r in rows) else ""))
 
     print("\n" + "-" * 62)
     print("BY DEADLINE   (where the time constraint bites)")

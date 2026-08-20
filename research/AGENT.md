@@ -47,19 +47,31 @@ non-maximal answer throws away the whole task.
 | path | what it is |
 | --- | --- |
 | `data/splits/train.jsonl` | **fully yours.** Graphs *and* every label: what the field answered, the best size, every distinct optimum. Train, tune, memorise, whatever helps. |
-| `data/splits/val_problems.jsonl` | graphs + deadlines only. Solve these. |
-| `data/splits/val_labels.jsonl` | **do not open.** The withheld answers, read only by the scorer. |
+| `data/splits/val_problems.jsonl` | 42 graphs + deadlines, no labels. Your steering signal — run it as often as you like. |
+| `data/splits/bigger_val_problems.jsonl` | 500 graphs, same format. The **audit** set. Run it rarely. |
+| `data/splits/val_labels.jsonl`, `bigger_val_labels.jsonl` | **do not open.** The withheld answers, read only by the scorer. |
 | `data/splits/manifest.json` | split sizes and the distribution check |
 
-Validation is stratified by (deadline, problem tier) to reproduce the live
-problem mix, and sized so that one full pass costs about **10 minutes** of solve
-time. Run it as often as you like.
+Both held-out sets are stratified by (deadline, problem tier) to reproduce the
+live problem mix, and both are disjoint from train and from each other.
 
-Ten minutes buys roughly 40 tasks, so a single run resolves the parity rate to
-about ±2.4 points — fine for steering, too coarse to call a small improvement
-real. Before a go/no-go decision, rebuild with a bigger budget
-(`python3 make_splits.py --budget 3600 --seed <new>`) and re-score; the seed
-change also guards against having quietly tuned on one particular draw.
+**`val` — 42 tasks, ~10 minutes a pass.** Your working loop. Cheap enough to run
+after every change. But 42 tasks resolves the parity rate only to about ±2.4
+points, and you will run it dozens of times, so expect to drift into fitting it:
+a change that moves val by one or two tasks has told you nothing.
+
+**`bigger_val` — 500 tasks, ~2 hours a pass.** The honest number. Run it **rarely**
+— when you think you have made a real step, and before any go/no-go decision.
+Not after every tweak, and never in a tuning loop. Its whole value is that you
+have not been optimising against it; spend that value only when the answer
+matters.
+
+```bash
+python3 score_submission.py --solver mymodule:solve                    # val, ~10 min
+python3 score_submission.py --solver mymodule:solve --split bigger_val # ~2 h, rarely
+```
+
+If `val` and `bigger_val` disagree, `bigger_val` is right.
 
 Every record:
 
@@ -112,22 +124,26 @@ python3 score_submission.py --submission answers.jsonl --strict
 ## What you get back
 
 ```
-SCORE vs BEST RIVAL
-  tasks                     440
-  matched or beat rivals    418   ( 95.0%)   <-- the target
-  strictly behind            22   (  5.0%)
-  invalid / no answer         0   (  0.0%)
-  mean size delta          -0.050 vertices
+==============================================================
+SCORE vs BEST RIVAL   (our clique size - best rival's)
+==============================================================
+  tasks 500
 
-DELTA DISTRIBUTION   (our clique size − best rival's)
-   +1     3    0.7%  ## ahead
-   +0   415   94.3%  ######################################## same as best rival
-   -1    20    4.5%  ## behind
-   -2     2    0.5%  # behind
+    +2      1    0.2%
+    +1      6    1.2%  #
+     0    463   92.6%  ###########################################  <-- same as best rival
+    -1     28    5.6%  ###
+    -2      2    0.4%
+
+  total solve time  6903s of 7146s allowed
 
 BY DEADLINE   (where the time constraint bites)
 BY GRAPH SIZE
 ```
+
+One row per exact delta, with empty bins shown so "never ahead" is visible
+rather than implied. The bin at `0` is the one to grow; everything below it is a
+task you lost outright.
 
 Plus per-deadline and per-size breakdowns, so you can see whether you are losing
 to the clock or to the graph. Add `--json report.json` for the raw per-task rows.

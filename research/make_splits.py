@@ -9,14 +9,23 @@ Sampling is stratified by (time_limit, problem tier) with proportional
 allocation and largest-remainder rounding, so the validation mix reproduces the
 source distribution rather than merely matching it in expectation.
 
-Three files come out of it:
+Two held-out sets are drawn, both stratified, both disjoint from train and from
+each other:
 
-  train.jsonl         full records, labels included — the agent may use all of it
-  val_problems.jsonl  graphs + time limits only, NO labels — the agent may solve
-                      these but cannot see the answers
-  val_labels.jsonl    the withheld labels, read only by score_submission.py
+  val          sized by --budget seconds (default 600, ~10 min a pass). The
+               steering signal, run as often as you like.
+  bigger_val   --bigger-n instances (default 500, hours of solve time). The
+               audit set: run it rarely, to confirm what val is hinting at.
 
-  python make_splits.py --budget 600
+Files:
+
+  train.jsonl                full records, labels included — unrestricted
+  val_problems.jsonl         graphs + time limits, NO labels
+  val_labels.jsonl           withheld, read only by score_submission.py
+  bigger_val_problems.jsonl  same, for the audit set
+  bigger_val_labels.jsonl    withheld
+
+  python make_splits.py --budget 600 --bigger-n 500
 """
 import argparse
 import collections
@@ -99,6 +108,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--budget", type=float, default=600.0,
                     help="target sum of time limits in the validation set, seconds")
+    ap.add_argument("--bigger-n", type=int, default=500,
+                    help="instances in the rarely-run audit set, drawn from train")
     ap.add_argument("--seed", type=int, default=8383)
     ap.add_argument("--glob", nargs="*",
                     default=[os.path.join(DATA_DIR, "v*", "*.jsonl"),
@@ -116,34 +127,48 @@ def main():
     print(f"validation target: {args.budget:.0f}s -> {n_val} instances")
 
     rng = random.Random(args.seed)
-    alloc, counts = allocate(pool, n_val)
-    by_stratum = collections.defaultdict(list)
-    for r in pool:
-        by_stratum[stratum(r)].append(r)
 
-    val_uuids = set()
-    for k, take in alloc.items():
-        group = by_stratum[k]
-        rng.shuffle(group)
-        for r in group[:take]:
-            val_uuids.add(r["uuid"])
+    def draw(remaining, n_take):
+        """Stratified draw of n_take records out of `remaining`."""
+        if n_take <= 0:
+            return [], remaining
+        alloc, _ = allocate(remaining, min(n_take, len(remaining)))
+        by_stratum = collections.defaultdict(list)
+        for r in remaining:
+            by_stratum[stratum(r)].append(r)
+        picked = set()
+        for k, take in alloc.items():
+            group = by_stratum[k]
+            rng.shuffle(group)
+            for r in group[:take]:
+                picked.add(r["uuid"])
+        return ([r for r in remaining if r["uuid"] in picked],
+                [r for r in remaining if r["uuid"] not in picked])
 
-    val = [r for r in pool if r["uuid"] in val_uuids]
-    train = [r for r in pool if r["uuid"] not in val_uuids]
+    # val first, then the audit set out of what is left, so the small steering
+    # set is never starved by the large one
+    val, rest = draw(pool, n_val)
+    bigger, train = draw(rest, args.bigger_n)
     val_seconds = sum(r["time_limit"] for r in val)
+    bigger_seconds = sum(r["time_limit"] for r in bigger)
 
     os.makedirs(SPLITS, exist_ok=True)
+
+    def write_split(name, records):
+        with open(os.path.join(SPLITS, f"{name}_problems.jsonl"), "w") as f:
+            for r in sorted(records, key=lambda r: r["uuid"]):
+                f.write(json.dumps({k: r[k] for k in PROBLEM_FIELDS if k in r},
+                                   separators=(",", ":")) + "\n")
+        with open(os.path.join(SPLITS, f"{name}_labels.jsonl"), "w") as f:
+            for r in sorted(records, key=lambda r: r["uuid"]):
+                f.write(json.dumps({k: r[k] for k in LABEL_FIELDS if k in r},
+                                   separators=(",", ":")) + "\n")
+
     with open(os.path.join(SPLITS, "train.jsonl"), "w") as f:
         for r in sorted(train, key=lambda r: r["uuid"]):
             f.write(json.dumps(r, separators=(",", ":")) + "\n")
-    with open(os.path.join(SPLITS, "val_problems.jsonl"), "w") as f:
-        for r in sorted(val, key=lambda r: r["uuid"]):
-            f.write(json.dumps({k: r[k] for k in PROBLEM_FIELDS if k in r},
-                               separators=(",", ":")) + "\n")
-    with open(os.path.join(SPLITS, "val_labels.jsonl"), "w") as f:
-        for r in sorted(val, key=lambda r: r["uuid"]):
-            f.write(json.dumps({k: r[k] for k in LABEL_FIELDS if k in r},
-                               separators=(",", ":")) + "\n")
+    write_split("val", val)
+    write_split("bigger_val", bigger)
 
     manifest = {
         "seed": args.seed,
@@ -153,33 +178,43 @@ def main():
         "val": len(val),
         "val_total_time_limit_s": round(val_seconds, 1),
         "val_wall_clock_estimate_min": round(val_seconds / 60, 2),
+        "bigger_val": len(bigger),
+        "bigger_val_total_time_limit_s": round(bigger_seconds, 1),
+        "bigger_val_wall_clock_estimate_min": round(bigger_seconds / 60, 2),
         "distribution_time_limit_pct": {
             "pool": dist(pool, lambda r: r["time_limit"]),
             "val": dist(val, lambda r: r["time_limit"]),
+            "bigger_val": dist(bigger, lambda r: r["time_limit"]) if bigger else {},
         },
         "distribution_vertex_tier_pct": {
             "pool": dist(pool, lambda r: (r["n"] - 1) // 100 * 100 + 100),
             "val": dist(val, lambda r: (r["n"] - 1) // 100 * 100 + 100),
+            "bigger_val": dist(bigger, lambda r: (r["n"] - 1) // 100 * 100 + 100) if bigger else {},
         },
         "distribution_difficulty_pct": {
             "pool": dist(pool, lambda r: r["difficulty"]),
             "val": dist(val, lambda r: r["difficulty"]),
+            "bigger_val": dist(bigger, lambda r: r["difficulty"]) if bigger else {},
         },
     }
     save_json(os.path.join(SPLITS, "manifest.json"), manifest)
 
-    print(f"\ntrain {len(train):,}   val {len(val)}   "
-          f"val budget {val_seconds:.0f}s ({val_seconds/60:.1f} min)")
-    print("\ndistribution check (pool % vs val %):")
+    print(f"\ntrain {len(train):,}")
+    print(f"val        {len(val):>5}   {val_seconds:>7.0f}s  ({val_seconds/60:.1f} min a pass)")
+    print(f"bigger_val {len(bigger):>5}   {bigger_seconds:>7.0f}s  "
+          f"({bigger_seconds/3600:.1f} h a pass — run rarely)")
+    print("\ndistribution check (pool % / val % / bigger_val %):")
     for name, block in (("time limit", manifest["distribution_time_limit_pct"]),
                         ("|V| tier (<=)", manifest["distribution_vertex_tier_pct"]),
                         ("difficulty", manifest["distribution_difficulty_pct"])):
         print(f"  {name}:")
         for k in sorted(block["pool"], key=lambda x: float(x)):
-            p, v = block["pool"][k], block["val"].get(k, 0.0)
-            flag = "" if abs(p - v) <= 3.0 else "   <-- drift"
-            print(f"    {k:>6}  pool {p:5.1f}%   val {v:5.1f}%{flag}")
-    print(f"\nwrote {SPLITS}/{{train,val_problems,val_labels}}.jsonl + manifest.json")
+            p = block["pool"][k]
+            v = block["val"].get(k, 0.0)
+            b = block["bigger_val"].get(k, 0.0)
+            flag = "" if abs(p - b) <= 1.5 else "   <-- bigger_val drift"
+            print(f"    {k:>6}  pool {p:5.1f}%   val {v:5.1f}%   bigger_val {b:5.1f}%{flag}")
+    print(f"\nwrote {SPLITS}/{{train,val_*,bigger_val_*}}.jsonl + manifest.json")
     return 0
 
 
