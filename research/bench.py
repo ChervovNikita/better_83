@@ -156,7 +156,8 @@ def get_tasks(setname, limit=0):
                   # inline sets too and not only on train-offset sets
                   "best_cliques": r.get("best_cliques"),
                   "best_clique_counts": r.get("best_clique_counts"),
-                  "size_hist": r.get("size_hist"), "difficulty": r.get("difficulty")}
+                  "size_hist": r.get("size_hist"), "difficulty": r.get("difficulty"),
+                  "any_unique": r.get("any_unique")}
                  if "b92" in r else
                  {"kind": "train", "uuid": r["uuid"], "n": r["n"], "tl": r["tl"],
                   "off": r["o"], "len": r["l"], "best": r["best"]}
@@ -192,7 +193,8 @@ def effective_cpus():
     return n
 
 
-def replay_reward(our_size, collide, size_hist, best_counts, difficulty):
+def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
+                  any_unique=None):
     """Replay CliqueScoreCalculator.get_scores() with us as one extra responder.
 
     reward = optimality*(1+difficulty) + diversity, where
@@ -222,12 +224,24 @@ def replay_reward(our_size, collide, size_hist, best_counts, difficulty):
     optim = omega / mo if mo > 0 else omega
     our_opt = float(optim[-1])
 
-    # diversity: our count is collisions+1; the field's per-clique counts give the max
+    # diversity: our count is collisions+1.
+    #
+    # max_delta in the validator ranges over EVERY valid answer, not just the
+    # best-size ones: `delta = val * (1/count)` and `max_delta = max(delta)`. So a
+    # miner who returns a small maximal clique nobody else returned sets max_delta to
+    # 1.0. Normalising against only the best-size cliques (as this did) overstates our
+    # diversity in exactly the rounds where the best-size cliques are crowded — and
+    # `any_unique` in the dataset is computed over all valid answers, so it is the
+    # right signal. The term is size-blind by construction: it pays for uniqueness,
+    # not for being unique at the top size.
     our_delta = 0.0 if our_size <= 0 else 1.0 / (1 + (collide or 0))
-    field_best_delta = 0.0
-    for c_ in (best_counts or []):
-        field_best_delta = max(field_best_delta, 1.0 / int(c_))
-    md = max(our_delta, field_best_delta)
+    if any_unique:
+        md = 1.0
+    else:
+        field_best_delta = 0.0
+        for c_ in (best_counts or []):
+            field_best_delta = max(field_best_delta, 1.0 / int(c_))
+        md = max(our_delta, field_best_delta)
     our_div = (our_delta / md) if md > 0 else 0.0
     return float(our_opt * (1 + difficulty) + our_div), our_opt, our_div
 
@@ -254,8 +268,9 @@ def _init(variant, threads, cores, env, offset=0):
 
 def _run(job):
     from CliqueAI.graph.codec import GraphCodec
-    t, time_scale, seed = job
+    t, time_scale, seed, time_offset = job
     best_cliques = best_counts = size_hist = difficulty = None
+    any_unique = None
     if t["kind"] == "split":
         b92 = t["b92"]
         density = t.get("density")
@@ -263,6 +278,7 @@ def _run(job):
         best_counts = t.get("best_clique_counts")
         size_hist = t.get("size_hist")
         difficulty = t.get("difficulty")
+        any_unique = t.get("any_unique")
     else:
         rec = read_train_record(t["off"], t["len"])
         b92, density = rec["matrix_b92"], rec["density"]
@@ -272,10 +288,12 @@ def _run(job):
         best_counts = rec.get("best_clique_counts")
         size_hist = rec.get("size_hist")
         difficulty = rec.get("difficulty")
+        any_unique = rec.get("any_unique")
     A = np.ascontiguousarray(np.array(GraphCodec().decode_matrix(b92), dtype=np.uint8))
     n = A.shape[0]
     out = np.zeros(n, dtype=np.int32)
-    budget = max(0.01, t["tl"] * time_scale - 0.03)
+    tl_eff = max(0.05, t["tl"] - time_offset)
+    budget = max(0.01, tl_eff * time_scale - 0.03)
     t0 = time.time()
     size = _W["lib"].sn83_solve(A.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), n,
                                 budget, ctypes.c_uint64(seed), _W["threads"], 0, 0,
@@ -312,7 +330,7 @@ def _run(job):
     reward = optim = divers = None
     if size_hist is not None and difficulty is not None:
         reward, optim, divers = replay_reward(got if ok else 0, collide, size_hist,
-                                              best_counts, difficulty)
+                                              best_counts, difficulty, any_unique)
     return dict(uuid=t["uuid"], n=t["n"], tl=t["tl"], density=density, best=t["best"],
                 ours=got, delta=(got - t["best"]) if ok else None, ok=ok, why=why,
                 elapsed=elapsed, over=elapsed > t["tl"] * 1.02 + 0.25,
@@ -377,6 +395,11 @@ def main():
                          "touched is capped at (available - reserve), so a sweep can "
                          "never take the whole machine")
     ap.add_argument("--time-scale", type=float, default=0.88)
+    ap.add_argument("--time-offset", type=float, default=0.0,
+                    help="seconds subtracted from every deadline BEFORE scaling, to "
+                         "model the network round trip a live miner pays to receive "
+                         "the task and submit the answer. 2.0 is a realistic worst "
+                         "case and bites hardest on the 6 s tier")
     ap.add_argument("--seed", type=int, default=0, help="solver RNG seed")
     ap.add_argument("--env", action="append", default=[], help="K=V passed to the solver")
     ap.add_argument("--flags", default="", help="extra g++ flags for this variant")
@@ -415,7 +438,8 @@ def main():
                  initargs=(args.variant, args.threads, cores, env,
                            args.core_offset)) as pool:
         rows = list(pool.imap_unordered(
-            _run, [(t, args.time_scale, args.seed) for t in tasks], chunksize=1))
+            _run, [(t, args.time_scale, args.seed, args.time_offset) for t in tasks],
+            chunksize=1))
     wall = time.time() - t0
     parity = summarize(rows, f"{args.variant} / {args.setname}")
     print(f"   wall {wall:.0f}s", file=sys.stderr)
@@ -425,6 +449,7 @@ def main():
         with open(args.json, "w") as f:
             json.dump({"variant": args.variant, "set": args.setname, "env": env,
                        "seed": args.seed, "threads": args.threads, "parity": parity,
+                       "time_offset": args.time_offset,
                        "wall_s": wall, "rows": rows}, f)
         print(f"   -> {args.json}", file=sys.stderr)
     return 0
