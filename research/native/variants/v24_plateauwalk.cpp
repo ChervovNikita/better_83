@@ -1,5 +1,3 @@
-// PROMOTED FROM native/variants/v24_plateauwalk.cpp
-// Do not edit here — edit the variant and re-run research/promote.sh.
 // SN83 maximum-clique core: bitset adjacency + LSCC-style local search.
 //
 // Why C++: the field's margin is one vertex on graphs up to |V|=900 inside a 6s

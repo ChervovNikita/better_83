@@ -194,7 +194,7 @@ def effective_cpus():
 
 
 def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
-                  any_unique=None):
+                  any_unique=None, n_responders=None):
     """Replay CliqueScoreCalculator.get_scores() with us as one extra responder.
 
     reward = optimality*(1+difficulty) + diversity, where
@@ -218,7 +218,13 @@ def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
     if mx <= 0:
         return 0.0, 0.0, 0.0
     rel = arr / mx
-    pr = np.array([(arr > s_).sum() / len(arr) for s_ in arr])
+    # pr's denominator is ALL responders, invalid included. Invalid answers carry
+    # masked size 0 so they never count as "strictly larger", but they do sit in the
+    # denominator and shrink pr for everyone.
+    denom = len(arr)
+    if n_responders:
+        denom = max(denom, int(n_responders) + 1)   # +1 for us joining the round
+    pr = np.array([(arr > s_).sum() / denom for s_ in arr])
     omega = np.where(arr > 0, np.exp(-pr / np.maximum(rel, 1e-9)), 0.0)
     mo = omega.max()
     optim = omega / mo if mo > 0 else omega
@@ -234,14 +240,37 @@ def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
     # `any_unique` in the dataset is computed over all valid answers, so it is the
     # right signal. The term is size-blind by construction: it pays for uniqueness,
     # not for being unique at the top size.
+    # The normaliser is 1/min(AUGMENTED group counts): joining a group changes that
+    # group's size, so max_delta must be computed after our answer is added. The
+    # any_unique shortcut is right almost always and wrong in exactly one case — when
+    # we duplicate the field's unique minimum-count clique, removing the count-1 group
+    # that was setting the normaliser.
     our_delta = 0.0 if our_size <= 0 else 1.0 / (1 + (collide or 0))
-    if any_unique:
+    counts = [int(c_) for c_ in (best_counts or [])]
+    c0 = int(collide or 0)
+
+    # `any_unique` covers ALL valid answers, including below-best ones whose per-clique
+    # counts the dataset does not store. So it is the authority on whether SOME group
+    # has count 1 — best-size groups alone are not.
+    others_unique = any_unique
+    if any_unique and c0 == 1 and counts.count(1) <= 1:
+        # We joined a singleton, and the only singleton we can SEE is the one we just
+        # destroyed. If a below-best answer was also unique the normaliser stays 1.0,
+        # but we cannot tell from the stored labels, so take the conservative branch.
+        others_unique = False
+
+    if others_unique:
         md = 1.0
     else:
-        field_best_delta = 0.0
-        for c_ in (best_counts or []):
-            field_best_delta = max(field_best_delta, 1.0 / int(c_))
-        md = max(our_delta, field_best_delta)
+        aug = list(counts)
+        if our_size > 0:
+            if c0 > 0 and c0 in aug:
+                aug.remove(c0)
+                aug.append(c0 + 1)     # that group grew by one when we joined it
+            elif c0 == 0:
+                aug.append(1)          # we form a new singleton group
+        md = max([1.0 / c_ for c_ in aug], default=our_delta)
+    md = max(md, our_delta)
     our_div = (our_delta / md) if md > 0 else 0.0
     return float(our_opt * (1 + difficulty) + our_div), our_opt, our_div
 
@@ -270,7 +299,7 @@ def _run(job):
     from CliqueAI.graph.codec import GraphCodec
     t, time_scale, seed, time_offset = job
     best_cliques = best_counts = size_hist = difficulty = None
-    any_unique = None
+    any_unique = n_resp = None
     if t["kind"] == "split":
         b92 = t["b92"]
         density = t.get("density")
@@ -279,6 +308,7 @@ def _run(job):
         size_hist = t.get("size_hist")
         difficulty = t.get("difficulty")
         any_unique = t.get("any_unique")
+        n_resp = t.get("n_resp")
     else:
         rec = read_train_record(t["off"], t["len"])
         b92, density = rec["matrix_b92"], rec["density"]
@@ -289,6 +319,7 @@ def _run(job):
         size_hist = rec.get("size_hist")
         difficulty = rec.get("difficulty")
         any_unique = rec.get("any_unique")
+        n_resp = rec.get("n_responders")
     A = np.ascontiguousarray(np.array(GraphCodec().decode_matrix(b92), dtype=np.uint8))
     n = A.shape[0]
     out = np.zeros(n, dtype=np.int32)
@@ -330,7 +361,8 @@ def _run(job):
     reward = optim = divers = None
     if size_hist is not None and difficulty is not None:
         reward, optim, divers = replay_reward(got if ok else 0, collide, size_hist,
-                                              best_counts, difficulty, any_unique)
+                                              best_counts, difficulty, any_unique,
+                                              n_resp)
     return dict(uuid=t["uuid"], n=t["n"], tl=t["tl"], density=density, best=t["best"],
                 ours=got, delta=(got - t["best"]) if ok else None, ok=ok, why=why,
                 elapsed=elapsed, over=elapsed > t["tl"] * 1.02 + 0.25,
