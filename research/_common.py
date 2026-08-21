@@ -90,6 +90,11 @@ def row_to_record(row, keep_answers=False):
         # sufficient statistics to replay validator scoring for a new answer
         "best_clique_counts": [counts[t] for t in best_sets],
         "size_hist": {str(k): v for k, v in sorted(size_hist.items())},
+        # {duplicate_count: n_distinct_valid_cliques}. Needed to normalise the
+        # diversity term exactly: the normaliser is the best delta over ALL valid
+        # answers, so it depends on the full count multiset, not just best-size ones.
+        "count_hist": {str(k): v for k, v in
+                       sorted(collections.Counter(counts.values()).items())},
         "any_unique": any(c == 1 for c in counts.values()),
     }
     if keep_answers:
