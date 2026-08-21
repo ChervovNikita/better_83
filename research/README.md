@@ -39,6 +39,10 @@ Two facts drive everything here:
 | `score_train.py` | parallel scoring against **train** labels — the inner tuning loop |
 | `make_splits.py` | stratified train / validation split, sized by solver budget |
 | `score_submission.py` | run a candidate solver on validation and score it |
+| `reward_reference.py` | exact validator reward replay (pinned by a test) |
+| `fleet_sim.py` | simulate entering with N hotkeys, with displacement modelled |
+| `fleet_solver.py` | `solve_many(A, time_limit, k)` — one solve, k distinct cliques |
+| `snapshot_metagraph.py` | who is displaceable, and when immunity lapses |
 | `AGENT.md` | the brief handed to whoever builds the solver |
 | `setup_server.sh` | provision a box (venv; cron optional) |
 | `requirements.txt` | **pinned** deps — see the wandb note below |
@@ -227,3 +231,50 @@ cd /workspace/better_83 && git pull && WANDB_API_KEY=... bash research/setup_ser
 
 `status.py` exits non-zero once the last successful fetch is more than 20
 minutes old, so it is safe to use as an external liveness check.
+
+## Fleet simulation
+
+`fleet_sim.py` answers "what happens if we register N hotkeys", modelling the two
+effects a naive replay misses: registering **removes** N miners, and any clique we
+return that collides with a survivor drags that survivor's diversity down as well
+as our own. Both change the field we are ranked against, so each round is rebuilt
+and rescored from scratch.
+
+Per round it drops the victims' answers, samples which of our hotkeys the
+validator would have queried (independent Bernoulli at `P(difficulty)`, exactly
+`MinerSelector`), inserts that many distinct cliques from one solve, and rescores.
+The resulting per-UID reward streams go through `update_scores` and `set_weights`
+to give our hotkeys' ranks and total emission share.
+
+```bash
+python3 snapshot_metagraph.py                       # incentive + registration blocks
+python3 build_dataset.py --versions 0.0.17 --limit 1000 --keep-answers \
+        --out data/sim_rounds.jsonl
+python3 fleet_sim.py --sizes 1 5 10 20 40 --rounds 1000 --solve   # slow, cached
+python3 fleet_sim.py --sizes 1 5 10 20 40 --rounds 1000 --history 3000
+```
+
+The solve phase is one call per round for `max(--sizes)` cliques (~12 s each,
+resumable, shared across every N); every N after that replays off the cache in
+seconds.
+
+**Guards, all of them added because the first version tripped over them.** A
+queried hotkey with no clique scores **zero** rather than vanishing from the round
+— the validator scores every selected UID, and dropping it made the debiased EMA a
+mean over answered rounds only, which inflated a 40-hotkey fleet by ~1100x. Every
+run reports a **zero-skill null** (our hotkeys draw a reward from the round's own
+survivors) and refuses to print alpha/day when the measured share falls inside it.
+`set_weights` is handed the real 256-wide uid-indexed vector, since validator
+slots hold 0 forever and the min-max step is a stretch, not an affine no-op. And
+`--gamma` is diagnostic only: the validator derives it by binary search until the
+top half takes exactly 80%, so forcing a converged value onto a short vector
+models a validator that hands the top half 99.9%. Converge the field with
+`--history` instead.
+
+**Two further traps it guards against.** `score_round` is pinned to
+`CliqueScoreCalculator` — 1,317 responses across 40 rounds with a third of the
+miners removed, max |Δ| = 0.0 — because the whole point is scoring a *modified*
+round. And γ derived from a short simulation comes out far below the live ~16.4,
+since sampling noise widens the field's score vector; under 500 rounds the script
+warns and you should pass `--gamma 16.4`. It also reports samples-per-hotkey,
+which at `P≈0.2` is only a fifth of the round count against the live field's ~595.
