@@ -35,6 +35,7 @@ import argparse
 import collections
 import importlib
 import json
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -75,6 +76,45 @@ def load_jsonl(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
+_W = {}
+
+
+def _init(solver, threads, cores):
+    """Pin the worker to its own cores so each solve sees a miner-sized machine."""
+    slot = mp.current_process()._identity[0] - 1 if mp.current_process()._identity else 0
+    if cores:
+        block = cores[(slot * threads) % len(cores):][:threads]
+        if len(block) == threads:
+            os.sched_setaffinity(0, block)
+    os.environ["SN83_THREADS"] = str(threads)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    mod, fn = solver.split(":")
+    _W["solve"] = getattr(importlib.import_module(mod), fn)
+
+
+def _run(job):
+    p, lab, time_scale, strict = job
+    A = decode(p["matrix_b92"])
+    t0 = time.time()
+    out = _W["solve"](A, p["time_limit"] * time_scale)
+    elapsed = time.time() - t0
+    clique = list(out[2]) if isinstance(out, tuple) else list(out)
+    return score_row(A, p, lab, clique, elapsed, strict)
+
+
+def score_row(A, p, lab, clique, elapsed, strict):
+    """The single place a task turns into a scored row, shared by both paths."""
+    ok, why = check(A, clique)
+    over = elapsed > p["time_limit"] * 1.02 + 0.25
+    if over and strict:
+        ok, why = False, f"over budget ({elapsed:.1f}s > {p['time_limit']}s)"
+    size = len(clique) if ok else 0
+    return dict(uuid=p["uuid"], n=p["n"], tl=p["time_limit"], density=p["density"],
+                best=lab["best_size"], ours=size,
+                delta=(size - lab["best_size"]) if ok else None,
+                ok=ok, why=why, elapsed=elapsed, over=over)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--solver", help="module:function, imported and timed here")
@@ -91,6 +131,13 @@ def main():
     ap.add_argument("--strict", action="store_true",
                     help="score over-budget answers as failures")
     ap.add_argument("--json", help="also write the report here")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="score this many tasks at once, each worker pinned to its own "
+                         "block of --threads cores. 1 (default) is the plain sequential "
+                         "pass; parallel is for bigger_val, where 2h becomes minutes")
+    ap.add_argument("--threads", type=int, default=int(os.environ.get("SN83_THREADS", "8")),
+                    help="cores per worker; must match what the solver actually uses, "
+                         "or the measured elapsed times stop meaning anything")
     args = ap.parse_args()
 
     if bool(args.solver) == bool(args.submission):
@@ -121,28 +168,33 @@ def main():
           f"({budget:.0f}s of deadline, ~{budget/60:.1f} min)\n", file=sys.stderr)
 
     rows, t_start = [], time.time()
-    for i, p in enumerate(problems, 1):
-        lab = labels[p["uuid"]]
-        A = decode(p["matrix_b92"])
-        if args.submission:
-            clique, elapsed = answers.get(p["uuid"], ([], 0.0))
-        else:
-            t0 = time.time()
-            out = solve(A, p["time_limit"] * args.time_scale)
-            elapsed = time.time() - t0
-            clique = list(out[2]) if isinstance(out, tuple) else list(out)
-        ok, why = check(A, clique)
-        over = elapsed > p["time_limit"] * 1.02 + 0.25
-        if over and args.strict:
-            ok, why = False, f"over budget ({elapsed:.1f}s > {p['time_limit']}s)"
-        size = len(clique) if ok else 0
-        rows.append(dict(uuid=p["uuid"], n=p["n"], tl=p["time_limit"],
-                         density=p["density"], best=lab["best_size"], ours=size,
-                         delta=(size - lab["best_size"]) if ok else None,
-                         ok=ok, why=why, elapsed=elapsed, over=over))
-        if i % 10 == 0:
-            print(f"  {i}/{len(problems)}  ({time.time()-t_start:.0f}s elapsed)",
-                  file=sys.stderr, flush=True)
+    if args.solver and args.workers > 1:
+        cores = sorted(os.sched_getaffinity(0))
+        workers = min(args.workers, max(1, len(cores) // args.threads))
+        print(f"  {workers} workers x {args.threads} pinned cores", file=sys.stderr)
+        jobs = [(p, labels[p["uuid"]], args.time_scale, args.strict) for p in problems]
+        with mp.Pool(workers, initializer=_init,
+                     initargs=(args.solver, args.threads, cores)) as pool:
+            for i, r in enumerate(pool.imap_unordered(_run, jobs), 1):
+                rows.append(r)
+                if i % 10 == 0:
+                    print(f"  {i}/{len(problems)}  ({time.time()-t_start:.0f}s elapsed)",
+                          file=sys.stderr, flush=True)
+    else:
+        for i, p in enumerate(problems, 1):
+            lab = labels[p["uuid"]]
+            A = decode(p["matrix_b92"])
+            if args.submission:
+                clique, elapsed = answers.get(p["uuid"], ([], 0.0))
+            else:
+                t0 = time.time()
+                out = solve(A, p["time_limit"] * args.time_scale)
+                elapsed = time.time() - t0
+                clique = list(out[2]) if isinstance(out, tuple) else list(out)
+            rows.append(score_row(A, p, lab, clique, elapsed, args.strict))
+            if i % 10 == 0:
+                print(f"  {i}/{len(problems)}  ({time.time()-t_start:.0f}s elapsed)",
+                      file=sys.stderr, flush=True)
 
     solved = [r for r in rows if r["ok"]]
     failed = [r for r in rows if not r["ok"]]

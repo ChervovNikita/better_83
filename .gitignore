@@ -174,3 +174,10 @@ bittensor_test/
 # SN83 research pipeline
 research/data/
 research/*.jsonl
+
+# native solver build products (research/data/ is already ignored above)
+research/native/*.so
+research/native/.build.lock
+
+# variant build locks
+research/native/variants/.*.lock

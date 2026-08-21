@@ -92,6 +92,45 @@ A = np.array(GraphCodec().decode_matrix(rec["matrix_b92"]), dtype=np.uint8)
 `best_size` (your target for that graph), `best_cliques` (every distinct optimum
 the field found), `size_hist`, and `n_at_best`.
 
+## The environment you have
+
+Already set up on this box, so start from it rather than rebuilding it:
+
+| what | where |
+| --- | --- |
+| compiled solver | `native/clique.cpp` — bitset adjacency, SCC local search, thread portfolio |
+| build | `native/build.sh`, one `g++ -O3 -march=native` call; `fastsolver.py` reruns it when the source is newer |
+| python entry point | `fastsolver.py` → `--solver fastsolver:solve` |
+| fast tuning loop | `score_train.py` — train labels, parallel, core-pinned |
+
+The box is 128 cores (znver2, AVX2 + BMI2, **no** AVX-512), 440 GB RAM, one RTX
+A4000. Installed: `g++ 11.4` and numpy. **Not** installed: numba, Cython, torch,
+scipy. The C++/ctypes path needs none of them; if you want something else,
+install it into a venv rather than the system python.
+
+`min_compute.yml` puts a real miner at 4 recommended / 8 cores, so the solver
+defaults to **8 threads** (`SN83_THREADS`). Do not raise it to use this box's
+128 — a val number won by 16x the CPU a miner has does not transfer to chain.
+
+### Tune on train, decide on val
+
+`score_train.py` samples train (same (time_limit, difficulty) strata as the
+splits) through a byte-offset index and runs tasks in parallel, each worker
+pinned to its own block of `--threads` cores so wall clock stays honest:
+
+```bash
+python3 score_train.py --n 200                  # ~3 min for 46 min of deadlines
+python3 score_train.py --n 400 --time-limit 6   # the tight deadline alone
+```
+
+Fix `--seed` when comparing revisions. Train is unrestricted, so tune there and
+spend `val` only on decisions — 42 tasks resolve parity to ±2.4 points, and the
+brief's warning about fitting the steering set is the reason this loop exists.
+
+`SN83_DEBUG=1` prints per-thread step/add/swap/perturb counts. Look there first
+when a change fails to help: it is what caught the current core's predecessor
+running 3.1M plateau swaps against 2 adds.
+
 ## Solver format
 
 Expose one function:
@@ -168,6 +207,15 @@ Measured against the live field, so you can skip these dead ends:
   and means nothing on its own.
 - **`networkx.approximation.max_clique`, which the subnet ships as its example
   miner, is far worse still.**
+- **The compiled core in `native/clique.cpp` scores 88.2% parity on the
+  `bigger_val` audit** (500 tasks: 441 ties, 1 at +4, 50 at -1, 7 at -2), 97.6%
+  on val, 91% on a 200-task train sample. That is the current floor to beat, and
+  the spread across those three is itself the lesson — val's 42 tasks flattered
+  it by nine points, so believe the audit.
+- **The remaining gap is graph size, not the clock.** By deadline the audit runs
+  82–95% with no ordering; by size it is 100% up to |V| = 500 and then falls to
+  92% / 83% / 62% / 73% at 600 / 700 / 800 / 900. Whatever closes the last ten
+  points lives on the big graphs.
 
 Where to look instead: the modern local-search family for maximum clique —
 LSCC+BMS, MN/TS (multi-neighbourhood tabu), Breakout Local Search, SCCWalk —

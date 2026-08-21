@@ -32,7 +32,11 @@ Two facts drive everything here:
 | `build_dataset.py` | bulk backfill into a JSONL corpus |
 | `eval_harness.py` | run a solver, replay scoring, report reward + implied emission |
 | `status.py` | pipeline health; exit 1 if stale or errored |
-| `solver.py` | baseline local search (mean reward 1.755 — the dead zone) |
+| `solver.py` | numpy baseline local search (mean reward 1.755 — the dead zone) |
+| `native/clique.cpp` | the working solver: bitset core, SCC local search, thread portfolio |
+| `native/build.sh` | one g++ call; no build deps beyond the compiler |
+| `fastsolver.py` | ctypes bridge — `--solver fastsolver:solve`, rebuilds the .so when stale |
+| `score_train.py` | parallel scoring against **train** labels — the inner tuning loop |
 | `make_splits.py` | stratified train / validation split, sized by solver budget |
 | `score_submission.py` | run a candidate solver on validation and score it |
 | `AGENT.md` | the brief handed to whoever builds the solver |
@@ -79,11 +83,72 @@ python3 eval_harness.py bench.jsonl --solver mysolver:run --time-limit 7.5
 # is the pipeline alive?
 python3 status.py
 
+# inner loop: tune against train labels, parallel, minutes not hours
+python3 score_train.py --solver fastsolver:solve --n 200
+
 # build the splits, then score a solver against the withheld labels
 python3 make_splits.py --budget 600 --bigger-n 500
 python3 score_submission.py --solver mymodule:solve                     # val, ~10 min
 python3 score_submission.py --solver mymodule:solve --split bigger_val  # audit, ~2 h
 ```
+
+## Solver toolchain
+
+The solver is plain C++ built by the box's own `g++` (11.4, znver2, AVX2 + BMI2,
+no AVX-512) and called through `ctypes`. Nothing else is installed: no numba, no
+Cython, no torch. `fastsolver.py` rebuilds `native/libclique.so` whenever
+`clique.cpp` is newer, under a file lock so the parallel harness cannot race, so
+the edit-run loop is just "edit the C++, re-run the scorer".
+
+`min_compute.yml` puts a real miner at 4 recommended / 8 cores, so the solver
+defaults to **8 threads** (`SN83_THREADS`) as a portfolio of independent
+searches. This box has 128 cores; using them all would produce validation
+numbers that do not transfer to chain.
+
+Two mechanisms carry the result, and both are load-bearing — an earlier revision
+without them scored *worse than the numpy baseline*:
+
+- **Strong configuration checking.** A vertex swapped out of `C` cannot return
+  until one of its neighbours is genuinely added. Plain CC frees a vertex when
+  any neighbour enters, which at density 0.9 means "always".
+- **Stagnation perturbation checked every step.** Gated behind "no legal move"
+  it never fires: instrumenting one 3s solve showed 3.1M plateau swaps against
+  2 adds, the search cycling forever on one plateau. That is the same saturation
+  the numpy baseline hits, and it is why more compute bought nothing.
+
+`SN83_DEBUG=1` prints per-thread step/add/swap/perturb counts — the first thing
+to look at when a change fails to help.
+
+Measured: **88.2% parity on the 500-task `bigger_val` audit**, 97.6% on val, 91%
+on a 200-task train sample, against the numpy baseline's 4.8%. No invalid and no
+over-budget answers in any of those passes. What is left is concentrated on the
+big graphs — 100% parity up to |V| = 500, 62% at |V| = 800.
+
+`score_submission.py` also takes `--workers N --threads T`, using the same
+core-pinned pool as the train loop; the default stays sequential. That is what
+turns the `bigger_val` audit from two hours into eight minutes, which is the
+only reason the number above exists this early.
+
+## The train loop
+
+`score_submission.py` is the honest signal but it is sequential: one val pass is
+ten wall-clock minutes and 42 tasks resolve parity only to ±2.4 points. Train
+carries the same labels and is unrestricted, so tuning belongs there.
+
+`score_train.py` draws a stratified sample by (time_limit, difficulty) — the
+same strata `make_splits.py` uses — from a byte-offset index over `train.jsonl`,
+then runs tasks across worker processes. **Each worker is pinned with
+`sched_setaffinity` to its own block of `--threads` cores**, so a solve sees a
+miner-sized machine and its wall clock stays comparable to a live deadline. 200
+tasks (46 min of deadline) finish in about 3 minutes.
+
+```bash
+python3 score_train.py --n 200                  # default solver is fastsolver:solve
+python3 score_train.py --n 400 --time-limit 6   # only the tight deadline
+python3 score_train.py --n 200 --max-n 900 --seed 2 --json rows.json
+```
+
+Keep `--seed` fixed to compare two solver revisions on the same instances.
 
 ## Splits
 

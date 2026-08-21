@@ -23,6 +23,22 @@ PY="$VENV/bin/python"
 "$PY" -c "import wandb, numpy; print('    wandb', wandb.__version__, '| numpy', numpy.__version__)"
 "$PY" -c "import sys; sys.path.insert(0, '$RESEARCH'); from _common import check_wandb_version; check_wandb_version(); print('    version guard: ok')"
 
+# The solver itself has no python dependencies beyond numpy: it is C++ built by
+# the box's own g++ and loaded with ctypes. Build it here so a fresh box can
+# score a solver immediately, not only fetch data.
+echo "==> native solver toolchain"
+if ! command -v g++ >/dev/null 2>&1; then
+  echo "    installing g++"
+  (apt-get update -qq && apt-get install -y -qq g++) >/dev/null 2>&1
+fi
+g++ --version | head -1 | sed 's/^/    /'
+bash "$RESEARCH/native/build.sh" | sed 's/^/    /'
+# Prefer the system python for the solver: it is what score_submission.py runs
+# under. Fall back to the venv if it has no numpy.
+SOLVER_PY=python3
+python3 -c "import numpy" >/dev/null 2>&1 || SOLVER_PY="$PY"
+"$SOLVER_PY" "$RESEARCH/fastsolver.py" | sed 's/^/    self-test: /'
+
 echo "==> W&B credentials"
 if [ -n "${WANDB_API_KEY:-}" ]; then
   umask 077
@@ -75,6 +91,7 @@ echo "==> status"
 cat <<EOF
 
 Done. The job appends to $DATA/v0.0.17/YYYY-MM-DD.jsonl every 5 minutes.
+  solver:  cd $RESEARCH && python3 score_train.py --n 200
   health:  cd $RESEARCH && python3 status.py
   log:     tail -f $DATA/fetch.log
   backfill more: python3 build_dataset.py --versions 0.0.17 --limit 0 --out bench.jsonl
