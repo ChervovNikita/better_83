@@ -167,13 +167,18 @@ def worst_alive(streams, alive, joined, t, immunity_rounds, alpha=0.01):
 
 
 def replay(rounds, cache, meta, N, seed, validity, immunity_rounds=1200,
-           apply_dereg=True, null=False):
+           apply_dereg=True, null=False, sample="real"):
     """Replay the real rounds in order, with our fleet in place of N miners.
 
     Identity is the HOTKEY, not the uid slot, because slots get recycled. Three
     things happen as the replay walks forward:
 
-      * our fleet answers the rounds it is sampled into, and a sampled hotkey we
+      * our fleet answers the rounds it is sampled into. With sample="real" we do
+        not re-roll that: we take over specific uid SLOTS, and the log already
+        records whether each slot was queried in each round. Selection is
+        `np.full(n, P)` — uniform across uids, independent of incentive or stake —
+        so the slot's own history is an exact draw from the right distribution,
+        with none of the variance a fresh Bernoulli adds. A queried hotkey we
         cannot serve takes a zero rather than vanishing
       * every round is rescored in full, so our collisions lower the colliding
         miner's diversity, and removing a miner can RAISE a survivor's diversity
@@ -189,6 +194,7 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_rounds=1200,
     victim_hotkeys = {uid_hotkey_now[u] for u in victim_uids if u in uid_hotkey_now}
 
     our_ids = [f"OURS-{i}" for i in range(N)]
+    our_slot = dict(zip(our_ids, victim_uids))       # which uid each of ours holds
     alive = ({m["hotkey"] for m in meta["miners"]} - victim_hotkeys) | set(our_ids)
     joined = {ident: -immunity_rounds for ident in alive}   # incumbents are not immune
     for o in our_ids:
@@ -224,8 +230,13 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_rounds=1200,
         keys = [tuple(sorted(a["clique"])) for a in survivors]
         idents = [a.get("hk") or f"uid{a['uid']}" for a in survivors]
 
-        p = selection_p(d)
-        picked = [o for o in our_ids if o in alive and rng.random() < p]
+        if sample == "real":
+            # the slot was queried this round iff it appears in the log
+            queried = {a["uid"] for a in rec["answers"]}
+            picked = [o for o in our_ids if o in alive and our_slot[o] in queried]
+        else:
+            p = selection_p(d)
+            picked = [o for o in our_ids if o in alive and rng.random() < p]
         pool = cache.get(rec["uuid"], {}).get("cliques", [])
         ok = validity.get(rec["uuid"], [])
         for j, o in enumerate(picked):
@@ -269,26 +280,40 @@ def score_vector(sc, meta, victim_uids, our_ids, alive):
 
     Validators are never selected by MinerSelector, so their slots hold 0 forever
     and min_val is always 0 — the min-max step is a stretch of the score axis, not
-    an affine no-op, so handing it a compressed vector changes the answer. Our
-    fleet occupies the uids it displaced.
+    an affine no-op, so handing it a compressed vector changes the answer.
+
+    Slots are assigned EXCLUSIVELY. Our fleet claims the uids it displaced first,
+    because the metagraph snapshot is taken later than the replayed rounds and can
+    already map a mid-replay registrant onto one of those uids; letting both write
+    the slot silently overwrote our score with a rival's, which flattened the
+    zero-skill null into a constant.
     """
-    vec = np.zeros(int(meta["n"]))
-    slot = {}
-    free = [u for u in range(int(meta["n"]))
-            if u not in {m["uid"] for m in meta["miners"]}]     # validator slots
-    hk_uid = {m["hotkey"]: m["uid"] for m in meta["miners"]}
+    n = int(meta["n"])
+    vec = np.zeros(n)
+    taken = {}
     for our, victim in zip(our_ids, victim_uids):
-        slot[our] = victim
+        taken[our] = victim
+    reserved = set(taken.values())
+
+    hk_uid = {m["hotkey"]: m["uid"] for m in meta["miners"]}
+    for ident in sc:
+        if ident in taken:
+            continue
+        u = hk_uid.get(ident)
+        if u is not None and u not in reserved:
+            taken[ident] = u
+            reserved.add(u)
+
+    free = [u for u in range(n) if u not in reserved]
+    for ident in sc:                      # anything left: registrants, uid-only ids
+        if ident in taken or not free:
+            continue
+        taken[ident] = free.pop()
+
     for ident, v in sc.items():
-        u = slot.get(ident, hk_uid.get(ident))
-        if u is None:                       # a hotkey that registered mid-replay
-            u = free.pop() if free else None
-            if u is None:
-                continue
-            slot[ident] = u
-        if ident in alive:
-            vec[u] = v
-    return vec, [slot[o] for o in our_ids if o in slot]
+        if ident in alive and ident in taken:
+            vec[taken[ident]] = v
+    return vec, [taken[o] for o in our_ids if o in taken]
 
 
 def set_weights(scores, target=0.80, max_gamma=32.0, force_gamma=None):
@@ -370,6 +395,12 @@ def main():
                          "drifts away from the data, which only ever contains the "
                          "NEW hotkey's answers, never the one it replaced.")
     ap.add_argument("--no-apply-dereg", dest="apply_dereg", action="store_false")
+    ap.add_argument("--sample", choices=["real", "bernoulli"], default="real",
+                    help="how to decide which of our hotkeys a round queries. 'real' "
+                         "reuses the query pattern the log already records for the uid "
+                         "slots we take over - exact, and free of resampling variance. "
+                         "'bernoulli' re-rolls it at P(difficulty); use it only to test "
+                         "sensitivity to the slots chosen.")
     ap.add_argument("--immunity-rounds", type=int, default=1200,
                     help="rounds a fresh registration is protected for; 6000 blocks of "
                          "immunity is ~20h, and one validator emits ~60 rounds an hour")
@@ -438,7 +469,7 @@ def main():
             streams, victim_uids, our_ids, alive, events = replay(
                 rounds, cache, meta, N, seed, validity,
                 immunity_rounds=args.immunity_rounds,
-                apply_dereg=args.apply_dereg, null=null)
+                apply_dereg=args.apply_dereg, null=null, sample=args.sample)
             sc = ema_scores(streams)
             vec, ours = score_vector(sc, meta, victim_uids, our_ids, alive)
             survived = sum(1 for o in our_ids if o in alive)
