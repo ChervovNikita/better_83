@@ -194,7 +194,7 @@ def effective_cpus():
 
 
 def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
-                  any_unique=None, n_responders=None):
+                  any_unique=None, n_responders=None, below_best=None):
     """Replay CliqueScoreCalculator.get_scores() with us as one extra responder.
 
     reward = optimality*(1+difficulty) + diversity, where
@@ -248,15 +248,26 @@ def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
     our_delta = 0.0 if our_size <= 0 else 1.0 / (1 + (collide or 0))
     counts = [int(c_) for c_ in (best_counts or [])]
     c0 = int(collide or 0)
+    if below_best is None:                     # infer from the size histogram
+        mx = max((int(s_) for s_ in (size_hist or {})), default=0)
+        below_best = sum(int(c_) for s_, c_ in (size_hist or {}).items()
+                         if int(s_) < mx) > 0
 
     # `any_unique` covers ALL valid answers, including below-best ones whose per-clique
     # counts the dataset does not store. So it is the authority on whether SOME group
     # has count 1 — best-size groups alone are not.
+    # `counts` covers BEST-SIZE cliques only; the labels do not record duplicate
+    # counts for smaller answers. So when we join the last best-size singleton we
+    # cannot see whether a below-best answer is still unique and keeping the
+    # normaliser at 1.0.
+    #
+    # Cross-checked against upstream's reward_reference.py on rounds where the full
+    # count_hist IS available: assuming the last visible singleton was the only one
+    # is WRONG and inflates diversity by up to 0.5. Below-best answers are distinct
+    # vertex sets of a different size and are essentially always unique, so if any
+    # exist (n_valid > n_at_best) the normaliser stays 1.0.
     others_unique = any_unique
-    if any_unique and c0 == 1 and counts.count(1) <= 1:
-        # We joined a singleton, and the only singleton we can SEE is the one we just
-        # destroyed. If a below-best answer was also unique the normaliser stays 1.0,
-        # but we cannot tell from the stored labels, so take the conservative branch.
+    if any_unique and c0 == 1 and counts.count(1) <= 1 and not below_best:
         others_unique = False
 
     if others_unique:
