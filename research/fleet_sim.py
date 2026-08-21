@@ -143,12 +143,28 @@ def validate_cliques(rec, cliques):
 
 # --------------------------------------------------------------- replay phase
 
-def replay(rounds, cache, meta, N, seed, validity):
-    """Rebuild every round with N of our hotkeys present and the victims gone."""
+def replay(rounds, cache, meta, N, seed, validity, history=(), null=False):
+    """Rebuild every round with N of our hotkeys present and the victims gone.
+
+    `history` is scored unmodified and feeds the field's EMA, so field UIDs carry
+    their full converged score while our fleet only has the simulated window —
+    which is the real asymmetry of entering an established subnet.
+    """
     rng = np.random.default_rng(seed)
-    victims = set(pick_victims(meta, N))
+    victim_uids = pick_victims(meta, N)
+    victims = set(victim_uids)
     our_uids = [-(i + 1) for i in range(N)]            # negative ids = ours
     streams = collections.defaultdict(list)
+    for u in our_uids:
+        streams[u] = []            # a fleet hotkey that is never served still exists
+
+    for rec in history:
+        d = rec["difficulty"]
+        sizes = [len(a["clique"]) for a in rec["answers"]]
+        valid = [1 if a["opt"] > 0 else 0 for a in rec["answers"]]
+        keys = [tuple(sorted(a["clique"])) for a in rec["answers"]]
+        for a, r in zip(rec["answers"], score_round(sizes, valid, keys, d)):
+            streams[a["uid"]].append(float(r))
 
     for rec in rounds:
         d = rec["difficulty"]
@@ -165,7 +181,18 @@ def replay(rounds, cache, meta, N, seed, validity):
         ok = validity.get(rec["uuid"], [])
         for j, u in enumerate(picked):
             if j >= len(pool):
-                break                                   # solver had fewer answers
+                # Queried but we had no clique for this hotkey. The validator
+                # still scores it: axon_requester returns a synapse whose
+                # maximum_clique defaults to [], clique_scoring rejects [], and
+                # update_scores folds a 0.0 in with an EMA step. Dropping the
+                # hotkey from the round instead would make its debiased EMA a
+                # mean over answered rounds only — survivorship bias, and it
+                # inflated N=40 by ~1100x.
+                sizes.append(0)
+                valid.append(0)
+                keys.append(("unserved", u))
+                uids.append(u)
+                continue
             c = pool[j]
             sizes.append(len(c))
             valid.append(1 if (j < len(ok) and ok[j]) else 0)
@@ -173,9 +200,17 @@ def replay(rounds, cache, meta, N, seed, validity):
             uids.append(u)
 
         rewards = score_round(sizes, valid, keys, d)
+        if null:
+            # zero-skill control: our hotkeys draw a reward from this round's own
+            # survivors, i.e. they perform like an average miner. Any real result
+            # must beat this or it is a noise realisation.
+            surv = [r for r, u in zip(rewards, uids) if u >= 0]
+            if surv:
+                rewards = [float(rng.choice(surv)) if u < 0 else r
+                           for r, u in zip(rewards, uids)]
         for u, r in zip(uids, rewards):
             streams[u].append(float(r))
-    return streams, victims
+    return streams, victim_uids
 
 
 def ema_scores(streams, alpha=0.01):
@@ -188,6 +223,25 @@ def ema_scores(streams, alpha=0.01):
         corr = 1 - (1 - alpha) ** len(xs)
         out[u] = e / corr if corr > 0 else 0.0
     return out
+
+
+def score_vector(sc, meta, victim_uids, our_uids):
+    """The vector set_weights actually sees: np.zeros(metagraph.n), uid-indexed.
+
+    Validators are never selected by MinerSelector, so their slots hold 0 forever
+    and min_val is always 0 — the min-max step is a stretch of the score axis, not
+    an affine no-op, so handing it a compressed vector changes the answer. Our
+    fleet occupies the uids it displaced.
+    """
+    vec = np.zeros(int(meta["n"]))
+    for u, v in sc.items():
+        if u >= 0:
+            vec[u] = v
+    ours = []
+    for our, victim in zip(our_uids, victim_uids):
+        vec[victim] = sc.get(our, 0.0)
+        ours.append(victim)
+    return vec, ours
 
 
 def set_weights(scores, target=0.80, max_gamma=32.0, force_gamma=None):
@@ -230,7 +284,8 @@ def set_weights(scores, target=0.80, max_gamma=32.0, force_gamma=None):
             else:
                 g_hi = m
     w = transform(g_hi)
-    return (w / w.sum() if w.sum() > 0 else w), g_hi
+    w[0] = 0.0                      # set_weights forces uid 0 to zero weight
+    return (w / w.sum() if w.sum() > 0 else w), g_hi, share(w)
 
 
 MINER_ALPHA_DAY = 2951.6
@@ -254,28 +309,45 @@ def main():
                     help="run the (slow) solve phase; otherwise replay the cache")
     ap.add_argument("--seed", type=int, default=8383)
     ap.add_argument("--gamma", type=float, default=None,
-                    help="force the weight exponent instead of deriving it from this "
-                         "sample. The live validators sit at ~16.4 after thousands of "
-                         "rounds; a short simulation derives a much smaller gamma and "
-                         "will overstate what a below-median fleet earns.")
+                    help="DIAGNOSTIC ONLY. set_weights derives gamma by binary search "
+                         "until the top half takes exactly 80%%; forcing a value the "
+                         "search would not have produced models a validator that does "
+                         "not exist. Forcing 16.4 onto a short, noise-widened vector "
+                         "gives the top half 99.9%%, not 80%%. Converge the field with "
+                         "--history instead.")
+    ap.add_argument("--history", type=int, default=0,
+                    help="rounds BEFORE the simulated window to score unmodified into "
+                         "the field's EMA. The live field's scores rest on ~595 samples "
+                         "per UID; without history the field is noise-widened and the "
+                         "derived gamma comes out far below the live ~16.4.")
+    ap.add_argument("--null-seeds", type=int, default=30,
+                    help="zero-skill control runs: our hotkeys draw a reward from the "
+                         "round's own survivors. A share inside the null is noise.")
     args = ap.parse_args()
 
     rounds = [json.loads(l) for l in open(args.dataset) if l.strip()]
     rounds = [r for r in rounds if r.get("answers")]
     rounds.sort(key=lambda r: (r.get("_run", ""), r.get("_step", 0)))
+    history = rounds[:-args.rounds][-args.history:] if args.history else []
     rounds = rounds[-args.rounds:]                      # latest consecutive block
     meta = json.load(open(args.metagraph))
     kmax = max(args.sizes)
     print(f"{len(rounds)} rounds | fleet sizes {args.sizes} | metagraph block {meta['block']}",
           file=sys.stderr)
-    per_uid = len(rounds) * float(np.mean([selection_p(r["difficulty"]) for r in rounds]))
-    print(f"  ~{per_uid:.0f} samples per simulated hotkey "
-          f"(the live field's scores rest on ~595)", file=sys.stderr)
-    if len(rounds) < 500 and args.gamma is None:
-        print("  WARNING: under 500 rounds the field's score vector is noise-widened, "
-              "so the derived gamma comes out far below the live ~16.4 and every "
-              "alpha/day figure below is optimistic. Pass --gamma 16.4, or use more "
-              "rounds.", file=sys.stderr)
+    p_mean = float(np.mean([selection_p(r["difficulty"]) for r in rounds]))
+    per_uid = len(rounds) * p_mean
+    print(f"  history {len(history)} rounds | ~{per_uid:.0f} samples per simulated "
+          f"hotkey (the live field rests on ~595)", file=sys.stderr)
+    if per_uid < 150:
+        print(f"  WARNING: {per_uid:.0f} samples per hotkey is far too few. Our fleet's "
+              f"scores are then mostly noise, and because the weight curve is a rank "
+              f"amplifier a lucky draw can dominate the sweep. Every figure below is "
+              f"unreliable until this is in the hundreds; the null columns are there to "
+              f"prove it.", file=sys.stderr)
+    if args.gamma is not None:
+        print(f"  WARNING: gamma forced to {args.gamma}. set_weights would have derived "
+              f"it so the top half takes exactly 80%; a forced value models a validator "
+              f"that cannot exist. Diagnostic only.", file=sys.stderr)
 
     if args.solve:
         solve_phase(rounds, kmax, args.solver, args.time_scale, args.cache)
@@ -289,6 +361,15 @@ def main():
     if missing:
         raise SystemExit(f"{len(missing)} rounds have no cached cliques; rerun with --solve")
 
+    pool_sizes = [len(cache[r["uuid"]]["cliques"]) for r in rounds]
+    if min(pool_sizes) < kmax:
+        starved = [N for N in args.sizes if N > min(pool_sizes)]
+        print(f"  WARNING: the cache holds {min(pool_sizes)}-{max(pool_sizes)} cliques "
+              f"per round but sizes {starved} need up to {kmax}. Hotkeys past the pool "
+              f"are queried and score ZERO, which is correct behaviour but means those "
+              f"rows measure a starved solver, not a fleet. Re-run --solve after "
+              f"widening --sizes.", file=sys.stderr)
+
     print("validating our cliques against the graphs...", file=sys.stderr)
     validity = {r["uuid"]: validate_cliques(r, cache[r["uuid"]]["cliques"]) for r in rounds}
     bad = sum(1 for v in validity.values() for x in v if not x)
@@ -297,32 +378,50 @@ def main():
 
     print()
     print(f"{'N':>4} {'displaced':>10} {'gamma':>6} {'our best':>9} {'our worst':>10} "
-          f"{'median rank':>12} {'fleet share':>12} {'a/day':>8} {'USD/day':>9}")
+          f"{'median rank':>12} {'fleet share':>12} {'null p5':>9} {'null p95':>9} {'a/day':>8}")
     results = []
     for N in args.sizes:
-        streams, victims = replay(rounds, cache, meta, N, args.seed, validity)
-        sc = ema_scores(streams)
-        uids = sorted(sc)
-        vec = np.array([sc[u] for u in uids])
-        w, gamma = set_weights(vec, force_gamma=args.gamma)
-        ours = [i for i, u in enumerate(uids) if u < 0]
-        rank = {i: r + 1 for r, i in enumerate(np.argsort(-vec))}
-        our_ranks = sorted(rank[i] for i in ours)
-        share = float(w[ours].sum())
-        results.append(dict(N=N, gamma=gamma, share=share, ranks=our_ranks,
-                            scores=[float(vec[i]) for i in ours],
-                            n_field=len(uids) - N))
-        print(f"{N:>4} {len(victims):>10} {gamma:>6.2f} {min(our_ranks):>9} "
-              f"{max(our_ranks):>10} {int(np.median(our_ranks)):>12} "
-              f"{share:>11.3%} {share*MINER_ALPHA_DAY:>8.1f} "
-              f"{share*MINER_ALPHA_DAY*ALPHA_TAO*190:>9.0f}")
+        our_uids = [-(i + 1) for i in range(N)]
+
+        def one(seed, null):
+            streams, victim_uids = replay(rounds, cache, meta, N, seed, validity,
+                                          history=history, null=null)
+            sc = ema_scores(streams)
+            vec, ours = score_vector(sc, meta, victim_uids, our_uids)
+            w, gamma, half = set_weights(vec, force_gamma=args.gamma)
+            live = vec > 0
+            order = np.argsort(-vec)
+            rank = {int(u): r + 1 for r, u in enumerate(order)}
+            return dict(share=float(w[ours].sum()), gamma=gamma, half=half,
+                        ranks=sorted(rank[u] for u in ours),
+                        scores=[float(vec[u]) for u in ours],
+                        n_live=int(live.sum()), victims=victim_uids)
+
+        real = one(args.seed, False)
+        nulls = [one(args.seed + 1000 + i, True)["share"] for i in range(args.null_seeds)]
+        lo, hi = np.percentile(nulls, [5, 95]) if nulls else (0.0, 0.0)
+        informative = real["share"] > hi
+        results.append(dict(N=N, null_p05=float(lo), null_p95=float(hi),
+                            informative=bool(informative), **real))
+        ad = real["share"] * MINER_ALPHA_DAY
+        print(f"{N:>4} {len(real['victims']):>10} {real['gamma']:>6.2f} "
+              f"{min(real['ranks']):>9} {max(real['ranks']):>10} "
+              f"{int(np.median(real['ranks'])):>12} {real['share']:>11.3%} "
+              f"{lo:>9.3%} {hi:>9.3%} "
+              + (f"{ad:>8.1f}" if informative else f"{'--':>8}")
+              + ("" if informative else "   <- inside the null, not a result"))
 
     print()
     for r in results:
         s = r["scores"]
+        flag = "" if r["informative"] else "   [NOT A RESULT: inside the null]"
         print(f"  N={r['N']:<3} our scores {np.mean(s):.4f} "
-              f"[{min(s):.4f}, {max(s):.4f}]   ranks {r['ranks'][:6]}"
-              f"{'...' if len(r['ranks']) > 6 else ''} of {r['n_field']+r['N']}")
+              f"[{min(s):.4f}, {max(s):.4f}]   top-half share {r['half']:.3f}   "
+              f"ranks {r['ranks'][:6]}{'...' if len(r['ranks']) > 6 else ''}"
+              f" of {r['n_live']}{flag}")
+    if not any(r["informative"] for r in results):
+        print("\nNo fleet size beat its zero-skill control. This run measures nothing "
+              "about the solver — raise --rounds and --history.", file=sys.stderr)
     json.dump(results, open(os.path.join(DATA_DIR, "fleet_sim_results.json"), "w"), indent=1)
     return 0
 

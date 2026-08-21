@@ -186,14 +186,27 @@ python3 snapshot_metagraph.py                       # incentive + registration b
 python3 build_dataset.py --versions 0.0.17 --limit 1000 --keep-answers \
         --out data/sim_rounds.jsonl
 python3 fleet_sim.py --sizes 1 5 10 20 40 --rounds 1000 --solve   # slow, cached
-python3 fleet_sim.py --sizes 1 5 10 20 40 --rounds 1000 --gamma 16.4   # instant sweeps
+python3 fleet_sim.py --sizes 1 5 10 20 40 --rounds 1000 --history 3000
 ```
 
 The solve phase is one call per round for `max(--sizes)` cliques (~12 s each,
 resumable, shared across every N); every N after that replays off the cache in
 seconds.
 
-**Two traps it guards against.** `score_round` is pinned to
+**Guards, all of them added because the first version tripped over them.** A
+queried hotkey with no clique scores **zero** rather than vanishing from the round
+— the validator scores every selected UID, and dropping it made the debiased EMA a
+mean over answered rounds only, which inflated a 40-hotkey fleet by ~1100x. Every
+run reports a **zero-skill null** (our hotkeys draw a reward from the round's own
+survivors) and refuses to print alpha/day when the measured share falls inside it.
+`set_weights` is handed the real 256-wide uid-indexed vector, since validator
+slots hold 0 forever and the min-max step is a stretch, not an affine no-op. And
+`--gamma` is diagnostic only: the validator derives it by binary search until the
+top half takes exactly 80%, so forcing a converged value onto a short vector
+models a validator that hands the top half 99.9%. Converge the field with
+`--history` instead.
+
+**Two further traps it guards against.** `score_round` is pinned to
 `CliqueScoreCalculator` — 1,317 responses across 40 rounds with a third of the
 miners removed, max |Δ| = 0.0 — because the whole point is scoring a *modified*
 round. And γ derived from a short simulation comes out far below the live ~16.4,
