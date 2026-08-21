@@ -14,12 +14,34 @@ minus the best rival's size is `>= 0`.
 parity rate = (tasks where delta >= 0) / (all tasks)
 ```
 
-Milestones: the shipped baseline sits at **4.8%**. **60%** means the approach
-works. **90%** means you are close.
-**99%+** is the real bar, and here is why it has to be that high — on chain,
-validator weights amplify *rank*, not reward. A solver that trails the field by
-one vertex on most rounds does not earn a bit less; it earns nothing. There is
-no partial credit, so treat every task you lose as a full loss.
+Calibrate against what the live field actually achieves. Scoring every rival
+operator on this exact metric — their answer against the best of all the *other*
+responders, over 302 rounds and ~15,000 answers:
+
+| operator | parity | mean optimality | mean reward |
+| --- | --- | --- | --- |
+| best rival solver | **89.0%** | 0.992 | 2.474 |
+| second | 80.2% | 0.974 | 2.483 |
+| every miner pooled | 71.8% | 0.946 | 2.451 |
+| top *earner* (wins on diversity, not size) | 68.2% | 0.943 | 2.501 |
+| weakest of the six fleets | 56.4% | 0.883 | 2.458 |
+| the shipped baseline | 4.8% | — | 1.755 |
+
+So the milestones are: **60%** means the approach works and you are already
+mid-field. **80%** puts you second. **89% ties the best solver on the subnet,
+and anything above it makes you the best.**
+
+100% is not the target and is probably not reachable. The label is the maximum
+over ~50 competing solvers, so it is a union that no single competitor matches —
+the strongest operator on the network still misses it 11% of the time. Do not
+read "we lost 11% of tasks" as failure; read it against the 11% the best rival
+loses.
+
+One honest caveat about where this leads: the operator taking the largest share
+of emission has only the *seventh* best solver here (68.2% parity) and wins on
+answer diversity instead. Size parity is the right thing to fix first because it
+is a hard floor, but once you are past ~80% the remaining money is in
+uniqueness, not in the last few vertices.
 
 **Out of scope for now:** answer *diversity*. The live subnet also rewards
 returning a clique no other miner returned, and that is worth more than size
@@ -164,6 +186,7 @@ Measured against the live field, so you can skip these dead ends:
   answer. Plateau search saturates. The gap is algorithmic.
 - **The baseline in `solver.py` scores 4.8% parity** on the 42-task validation
   set (2 matched, 5 at -1, 16 at -2, and a tail out to -7; mean delta -2.71).
+  The best rival, on the same metric, scores 89.0%.
   It is there as a regression floor, not a starting point — beating it is easy
   and means nothing on its own.
 - **`networkx.approximation.max_clique`, which the subnet ships as its example
