@@ -194,8 +194,16 @@ def effective_cpus():
 
 
 def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
-                  any_unique=None, n_responders=None, below_best=None):
+                  any_unique=None, n_responders=None, below_best=None,
+                  count_hist=None):
     """Replay CliqueScoreCalculator.get_scores() with us as one extra responder.
+
+    If `count_hist` is given -- the FULL {duplicate_count: n_distinct_cliques} map --
+    this delegates to reward_reference.replay_reward, which is the source of truth.
+    Everything below it is the approximation used when the set file only carries
+    best-size duplicate counts, and it has to GUESS whether a below-best answer is
+    keeping the diversity normaliser at 1.0. That guess was the second scoring bug.
+    Prefer the exact path; the fallback exists only for older set files.
 
     reward = optimality*(1+difficulty) + diversity, where
       omega_i       = exp(-pr_i / rel_i),  rel = size/max_size,
@@ -207,6 +215,13 @@ def replay_reward(our_size, collide, size_hist, best_counts, difficulty,
     term, so the ONLY way to separate from the pack is the diversity term — and that
     term is worth up to 1.0 against an optimality span of about 0.9.
     """
+    if count_hist:
+        import reward_reference
+        n_valid = sum(int(c_) for c_ in (size_hist or {}).values())
+        n_inv = max(int(n_responders or n_valid) - n_valid, 0)
+        return reward_reference.replay_reward(
+            our_size, int(collide or 0), size_hist, count_hist, difficulty, n_inv)
+
     sizes = []
     for s_, c_ in (size_hist or {}).items():
         sizes.extend([int(s_)] * int(c_))
@@ -373,7 +388,7 @@ def _run(job):
     if size_hist is not None and difficulty is not None:
         reward, optim, divers = replay_reward(got if ok else 0, collide, size_hist,
                                               best_counts, difficulty, any_unique,
-                                              n_resp)
+                                              n_resp, count_hist=t.get("count_hist"))
     return dict(uuid=t["uuid"], n=t["n"], tl=t["tl"], density=density, best=t["best"],
                 ours=got, delta=(got - t["best"]) if ok else None, ok=ok, why=why,
                 elapsed=elapsed, over=elapsed > t["tl"] * 1.02 + 0.25,
