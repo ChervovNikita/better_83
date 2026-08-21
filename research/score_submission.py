@@ -84,9 +84,12 @@ def main():
                          "multi-hour audit set — run it rarely")
     ap.add_argument("--problems", help="override the split's problem file")
     ap.add_argument("--labels", help="override the split's label file")
-    ap.add_argument("--time-scale", type=float, default=0.88,
-                    help="fraction of each deadline the solver may use; the rest is "
-                         "network headroom a live miner needs")
+    ap.add_argument("--latency-s", type=float, default=2.0,
+                    help="seconds reserved for the request/response round trip. This is "
+                         "a CONSTANT, not a fraction: the validator's timeout covers one "
+                         "HTTP exchange whose cost does not scale with the deadline. A "
+                         "0.88 fraction over-reserved 3.6s on a 30s task and only 0.7s "
+                         "on a 6s one, which is backwards.")
     ap.add_argument("--limit", type=int, default=0, help="score only the first N tasks")
     ap.add_argument("--strict", action="store_true",
                     help="score over-budget answers as failures")
@@ -128,7 +131,7 @@ def main():
             clique, elapsed = answers.get(p["uuid"], ([], 0.0))
         else:
             t0 = time.time()
-            out = solve(A, p["time_limit"] * args.time_scale)
+            out = solve(A, max(0.5, p["time_limit"] - args.latency_s))
             elapsed = time.time() - t0
             clique = list(out[2]) if isinstance(out, tuple) else list(out)
         ok, why = check(A, clique)

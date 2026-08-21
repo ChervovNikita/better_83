@@ -17,8 +17,8 @@ if REPO not in sys.path:
 # Every field we need. Never request `adjacency_list`: it is redundant with
 # encoded_matrix and large rows make the history endpoint return HTTP 500.
 KEYS = ["_step", "uuid", "number_of_nodes", "difficulty", "time_limit",
-        "encoded_matrix", "miner_ans", "miner_uids", "miner_coldkeys",
-        "miner_optimality", "miner_diversity", "miner_rewards"]
+        "encoded_matrix", "miner_ans", "miner_uids", "miner_hotkeys",
+        "miner_coldkeys", "miner_optimality", "miner_diversity", "miner_rewards"]
 
 # wandb >= 0.20 reroutes Run.scan_history through a service API that pulls the
 # whole run history before yielding anything. Our runs hold ~23k steps of
@@ -98,10 +98,13 @@ def row_to_record(row, keep_answers=False):
         "any_unique": any(c == 1 for c in counts.values()),
     }
     if keep_answers:
+        # hotkey identifies the NEURON; a hotkey change at a uid is a
+        # re-registration, which is how the simulator tracks live churn.
+        hks = row.get("miner_hotkeys") or [None] * len(ans)
         rec["answers"] = [
-            {"uid": u, "ck": c, "clique": a, "opt": o, "div": d, "reward": r}
-            for u, c, a, o, d, r in zip(
-                row.get("miner_uids", []), row.get("miner_coldkeys", []), ans, opt,
+            {"uid": u, "hk": h, "ck": c, "clique": a, "opt": o, "div": d, "reward": r}
+            for u, h, c, a, o, d, r in zip(
+                row.get("miner_uids", []), hks, row.get("miner_coldkeys", []), ans, opt,
                 row.get("miner_diversity", []), row.get("miner_rewards", []))
         ]
     return rec

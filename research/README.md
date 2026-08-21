@@ -98,6 +98,11 @@ one validation pass costs about ten minutes). Sampling is stratified by
 validation mix reproduces the pool rather than merely matching it in
 expectation; `manifest.json` records the side-by-side check.
 
+**The splits are for fitted components only.** A solver is an algorithm, not
+something trained on this data, so the honest test is `fleet_sim.py` replaying the
+real sequence of rounds in order. Split only what can overfit — a collision
+picker that learns which cliques to avoid.
+
 Two held-out sets are drawn, disjoint from train and from each other: `val`
 (~10 min a pass, the steering signal) and `bigger_val` (500 instances, ~2 h, the
 rarely-run audit). Each is split into `*_problems.jsonl` — graphs and deadlines,
