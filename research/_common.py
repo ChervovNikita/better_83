@@ -16,7 +16,7 @@ if REPO not in sys.path:
 
 # Every field we need. Never request `adjacency_list`: it is redundant with
 # encoded_matrix and large rows make the history endpoint return HTTP 500.
-KEYS = ["_step", "uuid", "number_of_nodes", "difficulty", "time_limit",
+KEYS = ["_step", "uuid", "timestamp", "number_of_nodes", "difficulty", "time_limit",
         "encoded_matrix", "miner_ans", "miner_uids", "miner_hotkeys",
         "miner_coldkeys", "miner_optimality", "miner_diversity", "miner_rewards"]
 
@@ -76,6 +76,9 @@ def row_to_record(row, keep_answers=False):
     edges = popcount_edges(row["encoded_matrix"], n)
     rec = {
         "uuid": row["uuid"],
+        # wall-clock of the round: immunity and churn are time-based, not
+        # round-count-based, and rounds from two validators interleave
+        "timestamp": row.get("timestamp"),
         "n": n,
         "edges": edges,
         "density": round(2 * edges / (n * (n - 1)), 5) if n > 1 else 0.0,

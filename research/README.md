@@ -218,3 +218,20 @@ round. And γ derived from a short simulation comes out far below the live ~16.4
 since sampling noise widens the field's score vector; under 500 rounds the script
 warns and you should pass `--gamma 16.4`. It also reports samples-per-hotkey,
 which at `P≈0.2` is only a fifth of the round count against the live field's ~595.
+
+### Sizing a fleet simulation
+
+Rounds arrive at **~105/h** across the two v0.0.17 validators (median gap 34 s), so
+the round count you need is set by what you want to observe, not by taste:
+
+| you want to see | subnet time | rounds | solve time on 12 cores |
+| --- | --- | --- | --- |
+| scores settle | ~6 h | 630 | 2.1 h |
+| our fleet leave immunity at all | 20 h | 2,091 | 7.0 h |
+| a few days of churn against us | 72 h | 7,528 | 25.1 h |
+| a week | 168 h | 17,565 | 58.6 h |
+
+Immunity is 6000 blocks ≈ 20 h of wall clock, taken from the round timestamps
+rather than a round count, because the two validators interleave. **Below ~2,100
+rounds the fleet never leaves immunity and the `survived` column is vacuous** —
+`fleet_sim.py` says so rather than letting the number be read as a result.

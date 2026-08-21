@@ -148,12 +148,16 @@ def validate_cliques(rec, cliques):
 
 # --------------------------------------------------------------- replay phase
 
-def worst_alive(streams, alive, joined, t, immunity_rounds, alpha=0.01):
+def worst_alive(streams, alive, joined, now, immunity_s, alpha=0.01):
     """The identity a fresh registration would displace: lowest current score
-    among those out of immunity. Ours are eligible too — that is the point."""
+    among those out of immunity. Ours are eligible too — that is the point.
+
+    Immunity is 6000 blocks of WALL CLOCK (~20 h), not a round count: rounds from
+    two validators interleave at ~105/h, so counting rounds would misdate it.
+    """
     best_id, best_score = None, None
     for ident in alive:
-        if t - joined.get(ident, 0) < immunity_rounds:
+        if now - joined.get(ident, -1e18) < immunity_s:
             continue
         xs = streams.get(ident, [])
         e = 0.0
@@ -166,7 +170,7 @@ def worst_alive(streams, alive, joined, t, immunity_rounds, alpha=0.01):
     return best_id
 
 
-def replay(rounds, cache, meta, N, seed, validity, immunity_rounds=1200,
+def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
            apply_dereg=True, null=False, sample="real"):
     """Replay the real rounds in order, with our fleet in place of N miners.
 
@@ -196,9 +200,10 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_rounds=1200,
     our_ids = [f"OURS-{i}" for i in range(N)]
     our_slot = dict(zip(our_ids, victim_uids))       # which uid each of ours holds
     alive = ({m["hotkey"] for m in meta["miners"]} - victim_hotkeys) | set(our_ids)
-    joined = {ident: -immunity_rounds for ident in alive}   # incumbents are not immune
+    t0 = rounds[0].get("timestamp") or 0.0
+    joined = {ident: -1e18 for ident in alive}    # incumbents are long out of immunity
     for o in our_ids:
-        joined[o] = 0                                        # we just registered
+        joined[o] = t0                            # we register at the first round
 
     streams = collections.defaultdict(list)
     for o in our_ids:
@@ -207,6 +212,7 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_rounds=1200,
     events = []
 
     for t, rec in enumerate(rounds):
+        now = rec.get("timestamp") or (t0 + t * 34.0)      # ~34s median round gap
         if apply_dereg:
             for a in rec["answers"]:
                 hk, uid = a.get("hk"), a["uid"]
@@ -214,12 +220,13 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_rounds=1200,
                     continue
                 prev = uid_seen.get(uid)
                 if hk not in alive and (prev is not None or uid in uid_hotkey_now):
-                    evicted = worst_alive(streams, alive, joined, t, immunity_rounds)
+                    evicted = worst_alive(streams, alive, joined, now, immunity_s)
                     if evicted is not None:
                         alive.discard(evicted)
                     alive.add(hk)
-                    joined[hk] = t
-                    events.append({"round": t, "uid": uid, "in": hk, "out": evicted})
+                    joined[hk] = now
+                    events.append({"round": t, "t": now, "uid": uid,
+                                   "in": hk, "out": evicted})
                 uid_seen[uid] = hk
 
         d = rec["difficulty"]
@@ -401,9 +408,10 @@ def main():
                          "slots we take over - exact, and free of resampling variance. "
                          "'bernoulli' re-rolls it at P(difficulty); use it only to test "
                          "sensitivity to the slots chosen.")
-    ap.add_argument("--immunity-rounds", type=int, default=1200,
-                    help="rounds a fresh registration is protected for; 6000 blocks of "
-                         "immunity is ~20h, and one validator emits ~60 rounds an hour")
+    ap.add_argument("--immunity-hours", type=float, default=20.0,
+                    help="6000 blocks x 12s. Measured in wall clock from the round "
+                         "timestamps, because two validators interleave at ~105 rounds "
+                         "an hour and a round count would misdate it.")
     ap.add_argument("--null-seeds", type=int, default=30,
                     help="zero-skill control runs: our hotkeys draw a reward from the "
                          "round's own survivors. A share inside the null is noise.")
@@ -417,8 +425,17 @@ def main():
     kmax = max(args.sizes)
     print(f"{len(rounds)} rounds | fleet sizes {args.sizes} | metagraph block {meta['block']}",
           file=sys.stderr)
+    stamps = [r["timestamp"] for r in rounds if r.get("timestamp")]
+    span_h = (max(stamps) - min(stamps)) / 3600.0 if len(stamps) > 1 else 0.0
     p_mean = float(np.mean([selection_p(r["difficulty"]) for r in rounds]))
     per_uid = len(rounds) * p_mean
+    print(f"  simulated span {span_h:.2f} h ({span_h/24:.2f} days) at "
+          f"{len(rounds)/span_h if span_h else 0:.0f} rounds/h", file=sys.stderr)
+    if span_h and span_h < args.immunity_hours:
+        print(f"  WARNING: the window is shorter than the {args.immunity_hours:.0f} h "
+              f"immunity, so our fleet can never be evicted and 'survived' is "
+              f"meaningless. Deregistration only becomes testable past "
+              f"~{args.immunity_hours*len(rounds)/span_h:.0f} rounds.", file=sys.stderr)
     print(f"  ~{per_uid:.0f} samples per simulated hotkey "
           f"(the live field rests on ~595)", file=sys.stderr)
     if per_uid < 150:
@@ -468,7 +485,7 @@ def main():
         def one(seed, null):
             streams, victim_uids, our_ids, alive, events = replay(
                 rounds, cache, meta, N, seed, validity,
-                immunity_rounds=args.immunity_rounds,
+                immunity_s=args.immunity_hours * 3600.0,
                 apply_dereg=args.apply_dereg, null=null, sample=args.sample)
             sc = ema_scores(streams)
             vec, ours = score_vector(sc, meta, victim_uids, our_ids, alive)
