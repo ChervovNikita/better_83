@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Paired comparison of two bench runs on the same task set.
 
+Covers BOTH halves of the objective: parity (McNemar over parity flips) and the
+diversity term (paired sign test over the tasks where the answer actually changed).
+
+The diversity half matters because unpaired means mislead here. A 120-task diversity
+mean has a standard error near 0.019, and 70-80% of tasks return the identical clique
+in both runs, so those tasks contribute nothing but variance. Comparing means diluted
+several real comparisons in this run before the paired test was added.
+
 Parity rate alone is a blunt instrument: on 500 tasks its standard error is ~1.4
 points, so a 1-point "improvement" is noise. But the two runs solved the SAME
 graphs, so compare them pairwise — only the tasks where they disagree carry
@@ -72,6 +80,36 @@ def main(pa, pb):
     p = mcnemar_p(a_only, b_only)
     print(f"  McNemar exact two-sided p = {p:.4f}"
           + ("   <-- significant at 0.05" if p < 0.05 else "   (not significant)"))
+    # --- diversity, paired over the answers that actually differ -----------------
+    da = [r for r in shared if ra[r].get("diversity") is not None
+          and rb[r].get("diversity") is not None]
+    if da:
+        diffs = [(rb[u]["diversity"] - ra[u]["diversity"]) for u in da]
+        changed = [(u, d) for u, d in zip(da, diffs) if abs(d) > 1e-9]
+        print(f"\nDIVERSITY (paired, only the {len(changed)} of {len(da)} tasks whose "
+              f"answer changed)")
+        if changed:
+            better = sum(1 for _, d in changed if d > 0)
+            worse = len(changed) - better
+            mean_all = sum(diffs) / len(diffs)
+            print(f"  B better on {better}, A better on {worse}")
+            print(f"  mean diversity change over ALL tasks: {mean_all:+.4f}")
+            p_div = mcnemar_p(worse, better)
+            print(f"  two-sided sign test p = {p_div:.4f}"
+                  + ("   <-- significant at 0.05" if p_div < 0.05 else "   (not significant)"))
+        else:
+            print("  identical answers on every task — nothing to test")
+
+    rw = [u for u in shared if ra[u].get("reward") is not None
+          and rb[u].get("reward") is not None]
+    if rw:
+        d = [rb[u]["reward"] - ra[u]["reward"] for u in rw]
+        m = sum(d) / len(d)
+        var = sum((x - m) ** 2 for x in d) / max(1, len(d) - 1)
+        se = (var / len(d)) ** 0.5
+        print(f"\nREWARD (paired over {len(rw)} tasks)")
+        print(f"  mean B - A = {m:+.4f}   SE {se:.4f}   t = {(m/se if se else 0):+.2f}")
+
     if hard_rows:
         print(f"\n  flipped tasks (uuid, n, tl, best, A, B):")
         for r in hard_rows[:20]:

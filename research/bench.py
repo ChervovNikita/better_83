@@ -151,7 +151,12 @@ def get_tasks(setname, limit=0):
         # Two flavours of set file: train-derived (byte offsets into train.jsonl) and
         # inline (the graph carried in the file, used for subsets of a held-out split).
         tasks = [{"kind": "split", "uuid": r["uuid"], "n": r["n"], "tl": r["tl"],
-                  "density": r.get("density"), "b92": r["b92"], "best": r["best"]}
+                  "density": r.get("density"), "b92": r["b92"], "best": r["best"],
+                  # carried when the set file has them, so reward replay works on
+                  # inline sets too and not only on train-offset sets
+                  "best_cliques": r.get("best_cliques"),
+                  "best_clique_counts": r.get("best_clique_counts"),
+                  "size_hist": r.get("size_hist"), "difficulty": r.get("difficulty")}
                  if "b92" in r else
                  {"kind": "train", "uuid": r["uuid"], "n": r["n"], "tl": r["tl"],
                   "off": r["o"], "len": r["l"], "best": r["best"]}
@@ -254,6 +259,10 @@ def _run(job):
     if t["kind"] == "split":
         b92 = t["b92"]
         density = t.get("density")
+        best_cliques = t.get("best_cliques")
+        best_counts = t.get("best_clique_counts")
+        size_hist = t.get("size_hist")
+        difficulty = t.get("difficulty")
     else:
         rec = read_train_record(t["off"], t["len"])
         b92, density = rec["matrix_b92"], rec["density"]

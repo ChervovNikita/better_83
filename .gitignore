@@ -181,3 +181,6 @@ research/native/.build.lock
 
 # variant build locks
 research/native/variants/.*.lock
+
+# solver backup written by research/promote.sh
+research/native/clique.cpp.prev
