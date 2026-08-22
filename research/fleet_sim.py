@@ -571,13 +571,24 @@ def main():
             live = vec > 0
             order = np.argsort(-vec)
             rank = {int(u): r + 1 for r, u in enumerate(order)}
+            # every identity's final score, ours and the field's alike: this is
+            # what set_weights consumed, so it is the leaderboard the round
+            # produced, not just our slice of it
+            uid_hk = {u: h for h, u in hk_uid.items()}
+            board = [{"uid": int(u), "rank": rank[int(u)], "score": float(vec[u]),
+                      "weight": float(w[u]),
+                      "who": ("OURS" if int(u) in ours else uid_hk.get(int(u), "?")),
+                      "ours": int(u) in ours}
+                     for u in np.flatnonzero(live)]
+            board.sort(key=lambda r: r["rank"])
             return dict(share=float(w[ours].sum()) if ours else 0.0,
                         gamma=gamma, half=half,
                         ranks=sorted(rank[u] for u in ours) or [0],
                         scores=[float(vec[u]) for u in ours] or [0.0],
                         n_live=int(live.sum()), victims=victim_uids,
                         survived=survived, of=len(our_ids),
-                        dereg_events=len(events), we_were_evicted=len(evicted_ours))
+                        dereg_events=len(events), we_were_evicted=len(evicted_ours),
+                        leaderboard=board, events=events)
 
         real = one(args.seed, False)
         nulls = [one(args.seed + 1000 + i, True)["share"] for i in range(args.null_seeds)]
@@ -605,7 +616,33 @@ def main():
     if not any(r["informative"] for r in results):
         print("\nNo fleet size beat its zero-skill control. This run measures nothing "
               "about the solver — raise --rounds.", file=sys.stderr)
-    json.dump(results, open(os.path.join(DATA_DIR, "fleet_sim_results.json"), "w"), indent=1)
+    out = os.path.join(DATA_DIR, "fleet_sim_results.json")
+    json.dump(results, open(out, "w"), indent=1)
+
+    # the field leaderboard for the largest fleet, which is the case that most
+    # changes the field
+    big = max(results, key=lambda r: r["N"])
+    board = big["leaderboard"]
+    ours = [b for b in board if b["ours"]]
+    field = [b["score"] for b in board if not b["ours"]]
+    print(f"\nFINAL SCORES at N={big['N']} — {len(board)} scoring identities")
+    print(f"  field   min {min(field):.4f}  p25 {np.percentile(field, 25):.4f}  "
+          f"median {np.median(field):.4f}  p75 {np.percentile(field, 75):.4f}  "
+          f"max {max(field):.4f}")
+    if ours:
+        os_ = [b["score"] for b in ours]
+        print(f"  ours    min {min(os_):.4f}  median {np.median(os_):.4f}  "
+              f"max {max(os_):.4f}   ranks {[b['rank'] for b in ours][:8]}"
+              f"{'...' if len(ours) > 8 else ''}")
+    print(f"\n  {'rank':>5} {'uid':>4} {'score':>8} {'weight':>9}  who")
+    for b in board[:10]:
+        print(f"  {b['rank']:>5} {b['uid']:>4} {b['score']:>8.4f} {b['weight']:>9.5f}  "
+              f"{'>>> OURS' if b['ours'] else b['who'][:12]}")
+    print("    ...")
+    for b in board[-5:]:
+        print(f"  {b['rank']:>5} {b['uid']:>4} {b['score']:>8.4f} {b['weight']:>9.5f}  "
+              f"{'>>> OURS' if b['ours'] else b['who'][:12]}")
+    print(f"\n  full per-identity scores and every deregistration event: {out}")
     return 0
 
 

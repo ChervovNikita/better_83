@@ -39,6 +39,20 @@ arrive at ~105/h, and **nothing about deregistration is testable below 20 h**,
 which is the immunity window; `run.py` says so rather than letting you read a
 vacuous `survived` column as a result.
 
+The test set is **frozen on first build**. `build_dataset` pulls `head - limit`
+and the head advances ~105 rounds/h, so a rebuild would silently move the ground
+under every comparison; `run.py` therefore skips the stage once the file is long
+enough and records `data/testset.json` — round count, UTC span, and a sha1 over
+the uuids — so two results can be checked against the same corpus. Growing it is
+safe (older rounds are appended). Redrawing needs `--force`, and invalidates
+every earlier number.
+
+The simulation ends with the **full leaderboard**: every scoring identity's final
+EMA score and chain weight, ours and the field's alike, ranked. That is the vector
+`set_weights` consumed, so it answers "where did we land among the miners" rather
+than just "what did we score". It lands in `data/fleet_sim_results.json` together
+with every deregistration event.
+
 `test_fleet_sim.py` is the gate. It runs inside `run.py` before the expensive
 stage and again against the real cache afterwards, and a failure stops the
 pipeline. Every check in it exists because something actually broke — the

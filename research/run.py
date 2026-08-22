@@ -40,6 +40,15 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, cwd=HERE, **kw).returncode
 
 
+def _digest(rows):
+    """Fingerprint of exactly which rounds are in the test set."""
+    import hashlib
+    h = hashlib.sha1()
+    for u in sorted(r["uuid"] for r in rows):
+        h.update(u.encode())
+    return h.hexdigest()[:16]
+
+
 def count_lines(path):
     if not os.path.exists(path):
         return 0
@@ -100,14 +109,35 @@ def main():
 
     if "dataset" in want:
         have = count_lines(dataset)
-        if args.force or have < rounds:
+        # The test set is FROZEN once built. build_dataset pulls `head - limit`,
+        # and head advances ~105 rounds/h, so rebuilding would silently move the
+        # ground under every comparison. Growing it is fine (the extra rounds are
+        # older, appended); shrinking or refreshing it is not, and needs --force.
+        if have >= rounds and not args.force:
+            print(f"\n[skip] dataset — frozen at {have} rounds in {dataset}")
+            print("       delete it or pass --force to draw a NEW test set; every "
+                  "result before and after will be incomparable")
+        else:
+            if have and not args.force:
+                print(f"\n[grow] dataset — {have} rounds present, need {rounds}")
             per_run = int(rounds / 2) + 200          # two validators, plus slack
             if sh([sys.executable, "build_dataset.py", "--versions", "0.0.17",
                    "--limit", str(per_run), "--workers", "2", "--keep-answers",
                    "--out", dataset]):
                 return 1
-        else:
-            print(f"\n[skip] dataset — {have} rounds already in {dataset}")
+            manifest = os.path.join(DATA, "testset.json")
+            rows = [json.loads(l) for l in open(dataset)]
+            stamps = sorted(r["timestamp"] for r in rows if r.get("timestamp"))
+            json.dump({"rounds": len(rows),
+                       "first_round_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                        time.gmtime(stamps[0])),
+                       "last_round_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                       time.gmtime(stamps[-1])),
+                       "span_hours": round((stamps[-1] - stamps[0]) / 3600, 2),
+                       "built_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                       "uuids_sha1": _digest(rows)},
+                      open(manifest, "w"), indent=1)
+            print(f"  test set frozen: {len(rows)} rounds -> {manifest}")
 
     if "selftest" in want:
         if sh([sys.executable, "test_reward_reference.py"]):
