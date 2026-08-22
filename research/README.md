@@ -24,6 +24,31 @@ Two facts drive everything here:
   size, and 41% are byte-identical to another miner's. Diversity is ~72% of the
   field's total reward loss.
 
+## Start here
+
+```bash
+python3 run.py --hours 24 --dry-run     # the plan and the ETA
+python3 run.py --stage selftest         # verify the code before trusting it
+python3 run.py --hours 24               # metagraph -> data -> selftest -> solve -> simulate
+```
+
+`run.py` is the entry point. Each stage is skipped when its output is already
+complete, and the solve stage — the only slow one — is resumable, so an
+interrupted run costs only what is left. `--hours` is the honest unit: rounds
+arrive at ~105/h, and **nothing about deregistration is testable below 20 h**,
+which is the immunity window; `run.py` says so rather than letting you read a
+vacuous `survived` column as a result.
+
+`test_fleet_sim.py` is the gate. It runs inside `run.py` before the expensive
+stage and again against the real cache afterwards, and a failure stops the
+pipeline. Every check in it exists because something actually broke — the
+simulator once re-admitted the miners it had just displaced, once reported a
+100% fleet share on a dataset missing hotkeys, once wrote real scores into
+validator slots, and once flattened its own zero-skill control to a constant.
+The strongest of them is `N=0 reproduces the validator's own logged rewards`:
+with no fleet inserted and nobody displaced, the replay must return the log
+byte for byte.
+
 ## Layout
 
 | file | what it does |
@@ -38,6 +63,8 @@ Two facts drive everything here:
 | `reward_reference.py` | exact validator reward replay (pinned by a test) |
 | `fleet_sim.py` | simulate entering with N hotkeys, with displacement modelled |
 | `fleet_solver.py` | `solve_many(A, time_limit, k)` — one solve, k distinct cliques |
+| `run.py` | **entry point** — the whole pipeline, resumable |
+| `test_fleet_sim.py` | invariant suite; the gate before any result is trusted |
 | `snapshot_metagraph.py` | who is displaceable, and when immunity lapses |
 | `AGENT.md` | the brief handed to whoever builds the solver |
 | `setup_server.sh` | provision a box (venv; cron optional) |

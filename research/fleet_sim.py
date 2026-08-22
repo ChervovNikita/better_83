@@ -199,12 +199,23 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
             "100% share. Rebuild with build_dataset.py --keep-answers.")
     rng = np.random.default_rng(seed)
     victim_uids = pick_victims(meta, N)
-    uid_hotkey_now = {m["uid"]: m["hotkey"] for m in meta["miners"]}
+
+    # Who occupies each uid AT THE START OF THE WINDOW, taken from the data, not
+    # from the metagraph snapshot. The snapshot is captured later, so a miner that
+    # answered during the window and was deregistered before the snapshot is
+    # missing from it entirely — seeding `alive` from the snapshot silently
+    # dropped those answers and broke the N=0 identity with the log.
+    uid_hotkey_now = {}
+    for rec in rounds:
+        for a in rec["answers"]:
+            uid_hotkey_now.setdefault(a["uid"], a["hk"])
+    for m in meta["miners"]:                       # uids that never answered
+        uid_hotkey_now.setdefault(m["uid"], m["hotkey"])
     victim_hotkeys = {uid_hotkey_now[u] for u in victim_uids if u in uid_hotkey_now}
 
     our_ids = [f"OURS-{i}" for i in range(N)]
     our_slot = dict(zip(our_ids, victim_uids))       # which uid each of ours holds
-    alive = ({m["hotkey"] for m in meta["miners"]} - victim_hotkeys) | set(our_ids)
+    alive = (set(uid_hotkey_now.values()) - victim_hotkeys) | set(our_ids)
     t0 = rounds[0].get("timestamp") or 0.0
     joined = {ident: -1e18 for ident in alive}    # incumbents are long out of immunity
     for o in our_ids:
@@ -290,7 +301,8 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
         for i, r in zip(idents, rewards):
             streams[i].append(float(r))
 
-    return streams, victim_uids, our_ids, alive, events
+    return (streams, victim_uids, our_ids, alive, events,
+            {h: u for u, h in uid_hotkey_now.items()})
 
 
 def ema_scores(streams, alpha=0.01):
@@ -305,7 +317,7 @@ def ema_scores(streams, alpha=0.01):
     return out
 
 
-def score_vector(sc, meta, victim_uids, our_ids, alive):
+def score_vector(sc, meta, victim_uids, our_ids, alive, hk_uid=None):
     """The vector set_weights actually sees: np.zeros(metagraph.n), uid-indexed.
 
     Validators are never selected by MinerSelector, so their slots hold 0 forever
@@ -325,7 +337,8 @@ def score_vector(sc, meta, victim_uids, our_ids, alive):
         taken[our] = victim
     reserved = set(taken.values())
 
-    hk_uid = {m["hotkey"]: m["uid"] for m in meta["miners"]}
+    if hk_uid is None:
+        hk_uid = {m["hotkey"]: m["uid"] for m in meta["miners"]}
     for ident in sc:
         if ident in taken:
             continue
@@ -535,12 +548,12 @@ def main():
     results = []
     for N in args.sizes:
         def one(seed, null):
-            streams, victim_uids, our_ids, alive, events = replay(
+            streams, victim_uids, our_ids, alive, events, hk_uid = replay(
                 rounds, cache, meta, N, seed, validity,
                 immunity_s=args.immunity_hours * 3600.0,
                 apply_dereg=args.apply_dereg, null=null, sample=args.sample)
             sc = ema_scores(streams)
-            vec, ours = score_vector(sc, meta, victim_uids, our_ids, alive)
+            vec, ours = score_vector(sc, meta, victim_uids, our_ids, alive, hk_uid)
             survived = sum(1 for o in our_ids if o in alive)
             evicted_ours = [e for e in events if str(e["out"]).startswith("OURS-")]
             w, gamma, half = set_weights(vec, force_gamma=args.gamma)
