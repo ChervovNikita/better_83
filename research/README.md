@@ -24,6 +24,64 @@ Two facts drive everything here:
   size, and 41% are byte-identical to another miner's. Diversity is ~72% of the
   field's total reward loss.
 
+## Start here
+
+```bash
+python3 run.py --hours 24 --dry-run     # the plan and the ETA
+python3 run.py --stage selftest         # verify the code before trusting it
+python3 run.py --hours 24               # metagraph -> data -> selftest -> solve -> simulate
+```
+
+`run.py` is the entry point. Each stage is skipped when its output is already
+complete, and the solve stage — the only slow one — is resumable, so an
+interrupted run costs only what is left. `--hours` is the honest unit: rounds
+arrive at ~105/h, and **nothing about deregistration is testable below 20 h**,
+which is the immunity window; `run.py` says so rather than letting you read a
+vacuous `survived` column as a result.
+
+The test set is **frozen on first build**. `build_dataset` pulls `head - limit`
+and the head advances ~105 rounds/h, so a rebuild would silently move the ground
+under every comparison; `run.py` therefore skips the stage once the file is long
+enough and records `data/testset.json` — round count, UTC span, and a sha1 over
+the uuids — so two results can be checked against the same corpus. Growing it is
+safe (older rounds are appended). Redrawing needs `--force`, and invalidates
+every earlier number.
+
+The simulation ends with the **full leaderboard**: every scoring identity's final
+EMA score and chain weight, ours and the field's alike, ranked. That is the vector
+`set_weights` consumed, so it answers "where did we land among the miners" rather
+than just "what did we score". It lands in `data/fleet_sim_results.json` together
+with every deregistration event.
+
+`test_fleet_sim.py` is the gate. It runs inside `run.py` before the expensive
+stage and again against the real cache afterwards, and a failure stops the
+pipeline. Every check in it exists because something actually broke — the
+simulator once re-admitted the miners it had just displaced, once reported a
+100% fleet share on a dataset missing hotkeys, once wrote real scores into
+validator slots, and once flattened its own zero-skill control to a constant.
+The strongest of them is `N=0 reproduces the validator's own logged rewards`:
+with no fleet inserted and nobody displaced, the replay must return the log
+byte for byte.
+
+## The saturation result
+
+Taking every slot is the cheapest way to find out what actually limits a fleet.
+Two hard limits fall out, neither of them the scoring mechanism:
+
+- **You cannot take the whole subnet.** Immune UIDs are protected, so the largest
+  instantaneous fleet is the non-immune count — 230 of 249 today. `pick_victims`
+  refuses anything larger rather than pretending.
+- **The clique pool is the binding constraint.** With the fleet holding every
+  displaceable slot, the hotkeys the pool can serve bunch tightly (first 4: mean
+  2.638, sd 0.214 — everyone runs the same solver, so they differ only in which
+  clique they were handed), while the remaining 226 average 0.296 and **131 score
+  exactly zero**. They are queried and have nothing to answer with.
+
+`solve_many` currently yields a median of **4** distinct cliques per round against
+20 requested, so a fleet past ~4 hotkeys is dead weight. Fleet scale and collision
+avoidance turn out to be the same capability: both need the solver to emit many
+distinct maximum cliques, and neither is reachable without it.
+
 ## Layout
 
 | file | what it does |
@@ -42,6 +100,8 @@ Two facts drive everything here:
 | `reward_reference.py` | exact validator reward replay (pinned by a test) |
 | `fleet_sim.py` | simulate entering with N hotkeys, with displacement modelled |
 | `fleet_solver.py` | `solve_many(A, time_limit, k)` — one solve, k distinct cliques |
+| `run.py` | **entry point** — the whole pipeline, resumable |
+| `test_fleet_sim.py` | invariant suite; the gate before any result is trusted |
 | `snapshot_metagraph.py` | who is displaceable, and when immunity lapses |
 | `AGENT.md` | the brief handed to whoever builds the solver |
 | `setup_server.sh` | provision a box (venv; cron optional) |
@@ -163,6 +223,11 @@ one validation pass costs about ten minutes). Sampling is stratified by
 validation mix reproduces the pool rather than merely matching it in
 expectation; `manifest.json` records the side-by-side check.
 
+**The splits are for fitted components only.** A solver is an algorithm, not
+something trained on this data, so the honest test is `fleet_sim.py` replaying the
+real sequence of rounds in order. Split only what can overfit — a collision
+picker that learns which cliques to avoid.
+
 Two held-out sets are drawn, disjoint from train and from each other: `val`
 (~10 min a pass, the steering signal) and `bigger_val` (500 instances, ~2 h, the
 rarely-run audit). Each is split into `*_problems.jsonl` — graphs and deadlines,
@@ -278,3 +343,20 @@ round. And γ derived from a short simulation comes out far below the live ~16.4
 since sampling noise widens the field's score vector; under 500 rounds the script
 warns and you should pass `--gamma 16.4`. It also reports samples-per-hotkey,
 which at `P≈0.2` is only a fifth of the round count against the live field's ~595.
+
+### Sizing a fleet simulation
+
+Rounds arrive at **~105/h** across the two v0.0.17 validators (median gap 34 s), so
+the round count you need is set by what you want to observe, not by taste:
+
+| you want to see | subnet time | rounds | solve time on 12 cores |
+| --- | --- | --- | --- |
+| scores settle | ~6 h | 630 | 2.1 h |
+| our fleet leave immunity at all | 20 h | 2,091 | 7.0 h |
+| a few days of churn against us | 72 h | 7,528 | 25.1 h |
+| a week | 168 h | 17,565 | 58.6 h |
+
+Immunity is 6000 blocks ≈ 20 h of wall clock, taken from the round timestamps
+rather than a round count, because the two validators interleave. **Below ~2,100
+rounds the fleet never leaves immunity and the `survived` column is vacuous** —
+`fleet_sim.py` says so rather than letting the number be read as a result.
