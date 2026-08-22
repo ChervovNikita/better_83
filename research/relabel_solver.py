@@ -94,3 +94,19 @@ if __name__ == "__main__":
 # divides the budget by K for BOTH arms, so it compared a union of 8 passes against
 # ONE pass at 1/8 budget. That ratio is close to arithmetic, not a finding. Against a
 # full-budget baseline the honest gain is the +15-20% measured here.
+
+# WHY IT CANNOT BE PUSHED FURTHER (instrumented per pass, 2026-08-22):
+#
+#   n=699 tl=7.5, field best 32:
+#     pass 0: size 31, 35 cliques   pass 1: size 32, 1 clique (union resets)
+#     passes 3-11: size 32, 1 clique each, +0 NEW EVERY TIME  -> union 1
+#   n=897 tl=30: passes 0-2 reach a union of 12; nine more passes add +0
+#
+# Relabelling does not diversify MAXIMUM cliques -- every pass converges to the same
+# ones. The richness lives one vertex BELOW the maximum (35-74 cliques at size 31,
+# exactly 1 at size 32): the plateau is wide at size-1 and a needle at the top.
+#
+# True distinct maximum cliques per round: min 1, p25 5, median 24, max 40.
+# 8% of rounds have exactly ONE. 68% have fewer than 40. An instance cannot serve
+# more hotkeys than it HAS maximum cliques, so an N=40 fleet is not reachable by any
+# solver -- the optima do not exist. Same fact as "16x budget gives 1.00x maxima".
