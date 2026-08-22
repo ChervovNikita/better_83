@@ -192,6 +192,11 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
         may be one of ours — which is the question the simulation exists to
         answer.
     """
+    if not any(a.get("hk") for r in rounds for a in r["answers"]):
+        raise SystemExit(
+            "this dataset has no per-answer hotkeys, so field identities cannot be "
+            "tracked and score_vector would keep only our fleet - which reports a "
+            "100% share. Rebuild with build_dataset.py --keep-answers.")
     rng = np.random.default_rng(seed)
     victim_uids = pick_victims(meta, N)
     uid_hotkey_now = {m["uid"]: m["hotkey"] for m in meta["miners"]}
@@ -210,6 +215,13 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
         streams[o] = []
     uid_seen = {}
     events = []
+    # Displaced identities are gone for good. Without this, a victim's very next
+    # answer looked like a fresh registration ("hk not in alive"), it was
+    # re-admitted, and it evicted somebody else - a cascade that re-admitted 249
+    # of 255 identities and left 100% of victim answers still being scored. The
+    # simulator displaced nobody.
+    retired = set(victim_hotkeys)
+    n_slots = len(meta["miners"])
 
     for t, rec in enumerate(rounds):
         now = rec.get("timestamp") or (t0 + t * 34.0)      # ~34s median round gap
@@ -219,23 +231,34 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
                 if hk is None:
                     continue
                 prev = uid_seen.get(uid)
-                if hk not in alive and (prev is not None or uid in uid_hotkey_now):
-                    evicted = worst_alive(streams, alive, joined, now, immunity_s)
+                # a registration is an OCCUPANT CHANGE at a uid, not merely an
+                # unfamiliar hotkey
+                if (prev is not None and prev != hk and hk not in retired
+                        and hk not in alive):
+                    # The chain deregisters the lowest pruning score. In our world
+                    # the named predecessor is the faithful choice when it is still
+                    # here; when it is not, it is because WE took that slot, and
+                    # then the eviction falls to the worst - which can be us.
+                    evicted = prev if prev in alive else worst_alive(
+                        streams, alive, joined, now, immunity_s)
                     if evicted is not None:
                         alive.discard(evicted)
+                        retired.add(evicted)
                     alive.add(hk)
                     joined[hk] = now
                     events.append({"round": t, "t": now, "uid": uid,
                                    "in": hk, "out": evicted})
                 uid_seen[uid] = hk
+            if len(alive) > n_slots:
+                raise AssertionError(
+                    f"population {len(alive)} exceeds {n_slots} miner slots at round {t}")
 
         d = rec["difficulty"]
-        survivors = [a for a in rec["answers"]
-                     if a.get("hk") is None or a["hk"] in alive]
+        survivors = [a for a in rec["answers"] if a["hk"] in alive]
         sizes = [len(a["clique"]) for a in survivors]
         valid = [1 if a["opt"] > 0 else 0 for a in survivors]
         keys = [tuple(sorted(a["clique"])) for a in survivors]
-        idents = [a.get("hk") or f"uid{a['uid']}" for a in survivors]
+        idents = [a["hk"] for a in survivors]
 
         if sample == "real":
             # the slot was queried this round iff it appears in the log
@@ -311,16 +334,35 @@ def score_vector(sc, meta, victim_uids, our_ids, alive):
             taken[ident] = u
             reserved.add(u)
 
-    free = [u for u in range(n) if u not in reserved]
-    for ident in sc:                      # anything left: registrants, uid-only ids
-        if ident in taken or not free:
-            continue
+    # Slots freed by identities that have LEFT (retired incumbents) are the only
+    # ones a mid-replay registrant may take. The 7 validator uids are not free:
+    # MinerSelector never queries them, so on chain they hold 0 forever, and
+    # writing a real score there both distorts the vector and is then destroyed by
+    # weights[0] = 0.
+    validator_uids = {u for u in range(n)} - {m["uid"] for m in meta["miners"]}
+    homeless = [i for i in sc if i not in taken and i in alive]
+    free = [u for u in range(n)
+            if u not in reserved and u not in validator_uids and vec_owner_free(u, sc, hk_uid, alive)]
+    for ident in homeless:
+        if not free:
+            raise AssertionError(
+                f"{len(homeless)} live identities have no uid slot (n={n}, "
+                f"{len(reserved)} reserved). Dropping them would delete real "
+                f"competitors from the denominator.")
         taken[ident] = free.pop()
 
     for ident, v in sc.items():
         if ident in alive and ident in taken:
             vec[taken[ident]] = v
     return vec, [taken[o] for o in our_ids if o in taken]
+
+
+def vec_owner_free(u, sc, hk_uid, alive):
+    """True when no live identity already claims uid u."""
+    for hk, uid in hk_uid.items():
+        if uid == u and hk in alive and hk in sc:
+            return False
+    return True
 
 
 def set_weights(scores, target=0.80, max_gamma=32.0, force_gamma=None):
@@ -419,7 +461,14 @@ def main():
 
     rounds = [json.loads(l) for l in open(args.dataset) if l.strip()]
     rounds = [r for r in rounds if r.get("answers")]
-    rounds.sort(key=lambda r: (r.get("_run", ""), r.get("_step", 0)))
+    # chronological, NOT (_run, _step): _step is per-validator, so sorting by it
+    # concatenates one validator's whole stream after the other's. Churn and
+    # immunity are wall-clock, and the two streams interleave at ~105 rounds/h.
+    if all(r.get("timestamp") for r in rounds):
+        rounds.sort(key=lambda r: r["timestamp"])
+    else:
+        raise SystemExit("dataset lacks timestamps; rebuild with build_dataset.py "
+                         "so rounds can be replayed in chronological order")
     rounds = rounds[-args.rounds:]      # the real sequence, in order, not a sample
     meta = json.load(open(args.metagraph))
     kmax = max(args.sizes)
@@ -431,11 +480,14 @@ def main():
     per_uid = len(rounds) * p_mean
     print(f"  simulated span {span_h:.2f} h ({span_h/24:.2f} days) at "
           f"{len(rounds)/span_h if span_h else 0:.0f} rounds/h", file=sys.stderr)
-    if span_h and span_h < args.immunity_hours:
-        print(f"  WARNING: the window is shorter than the {args.immunity_hours:.0f} h "
-              f"immunity, so our fleet can never be evicted and 'survived' is "
-              f"meaningless. Deregistration only becomes testable past "
-              f"~{args.immunity_hours*len(rounds)/span_h:.0f} rounds.", file=sys.stderr)
+    if span_h < args.immunity_hours:
+        need = (args.immunity_hours * len(rounds) / span_h) if span_h else float("nan")
+        print(f"  WARNING: the window ({span_h:.2f} h) is shorter than the "
+              f"{args.immunity_hours:.0f} h immunity, so our fleet can never be "
+              f"evicted and 'survived' is meaningless. Deregistration only becomes "
+              f"testable past ~{need:.0f} rounds."
+              + ("  (no timestamps in this dataset)" if not span_h else ""),
+              file=sys.stderr)
     print(f"  ~{per_uid:.0f} samples per simulated hotkey "
           f"(the live field rests on ~595)", file=sys.stderr)
     if per_uid < 150:
