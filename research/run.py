@@ -40,6 +40,10 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, cwd=HERE, **kw).returncode
 
 
+def _utc(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
 def _digest(rows):
     """Fingerprint of exactly which rounds are in the test set."""
     import hashlib
@@ -47,22 +51,6 @@ def _digest(rows):
     for u in sorted(r["uuid"] for r in rows):
         h.update(u.encode())
     return h.hexdigest()[:16]
-
-
-def _schema_ok(path):
-    """First record must carry a timestamp and per-answer hotkeys."""
-    try:
-        with open(path) as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                r = json.loads(line)
-                ans = r.get("answers") or []
-                return bool(r.get("timestamp")) and bool(ans) and \
-                    any(a.get("hk") for a in ans)
-    except (OSError, ValueError):
-        return False
-    return False
 
 
 def count_lines(path):
@@ -107,6 +95,14 @@ def main():
               f"window, so the fleet can never be evicted and 'survived' will be\n"
               f"        vacuous. Use --hours {IMMUNITY_H:.0f} or more to test "
               f"deregistration.")
+    elif args.hours < 3 * IMMUNITY_H:
+        exposed = args.hours - IMMUNITY_H
+        print(f"\n  NOTE: immunity runs {IMMUNITY_H:.0f} h from join, so "
+              f"--hours {args.hours:.0f} leaves only {exposed:.0f} h of exposure. At "
+              f"~20 registrations/day\n        that is ~{exposed/24*20*10/249:.2f} "
+              f"expected evictions of a 10-hotkey fleet — 'survived' will read N/N\n"
+              f"        regardless of skill. ~72 h is the first window where it "
+              f"discriminates.")
 
     want = STAGES[STAGES.index(args.stage or args.from_stage):] if not args.stage \
         else [args.stage]
@@ -125,57 +121,108 @@ def main():
 
     if "dataset" in want:
         have = count_lines(dataset)
-        # A line count is not enough: an older dataset can satisfy it and still
-        # lack the per-answer hotkeys and timestamps the replay needs. That file
-        # would sail through here, cost a full solve, and only fail at simulate.
-        if have and not _schema_ok(dataset):
-            print(f"\n[stale] {dataset} predates the hk/timestamp schema — moving "
-                  f"it aside and rebuilding")
-            os.rename(dataset, dataset + ".oldschema")
-            have = 0
-        # The test set is FROZEN once built. build_dataset pulls `head - limit`,
-        # and head advances ~105 rounds/h, so rebuilding would silently move the
-        # ground under every comparison. Growing it is fine (the extra rounds are
-        # older, appended); shrinking or refreshing it is not, and needs --force.
+        manifest = os.path.join(DATA, "testset.json")
+        frozen = json.load(open(manifest)) if os.path.exists(manifest) else None
+
         if have >= rounds and not args.force:
+            if frozen is None:
+                # a dataset that predates the manifest: adopt it and pin it now,
+                # otherwise it has no provenance and no frozen head
+                rows = [json.loads(l) for l in open(dataset)]
+                stamps = [r["timestamp"] for r in rows if r.get("timestamp")]
+                frozen = {"rounds": len(rows), "first_round_utc": _utc(min(stamps)),
+                          "last_round_utc": _utc(max(stamps)),
+                          "span_hours": round((max(stamps)-min(stamps))/3600, 2),
+                          "frozen_head_ts": max(stamps),
+                          "frozen_head_utc": _utc(max(stamps)),
+                          "built_utc": _utc(os.path.getmtime(dataset)),
+                          "adopted_utc": _utc(time.time()),
+                          "uuids_sha1": _digest(rows)}
+                json.dump(frozen, open(manifest, "w"), indent=1)
+                print(f"\n[pin]  dataset — adopted {have} pre-existing rounds")
             print(f"\n[skip] dataset — frozen at {have} rounds in {dataset}")
-            print("       delete it or pass --force to draw a NEW test set; every "
-                  "result before and after will be incomparable")
+            print(f"       {frozen['first_round_utc']} .. "
+                  f"{frozen['last_round_utc']}  sha1 {frozen['uuids_sha1']}")
+            print("       --force draws a NEW test set; every earlier result "
+                  "becomes incomparable")
         else:
+            # Growing must only ever extend BACKWARDS. build_dataset truncates its
+            # output and pulls from the CURRENT head, which advances ~105 rounds/h,
+            # so a naive re-pull silently swaps in newer rounds at the top and can
+            # drop rounds already scored. Keep everything we have, and admit only
+            # rounds older than the boundary fixed at first build.
+            existing = {}
             if have and not args.force:
-                print(f"\n[grow] dataset — {have} rounds present, need {rounds}")
-            per_run = int(rounds / 2) + 200          # two validators, plus slack
+                with open(dataset) as f:
+                    for line in f:
+                        r = json.loads(line)
+                        existing[r["uuid"]] = r
+                print(f"\n[grow] dataset — {have} rounds present, need {rounds}; "
+                      f"extending backwards only")
+
+            boundary = frozen.get("frozen_head_ts") if (frozen and existing) else None
+            tmp = dataset + ".new"
+            # build_dataset pulls backwards from the CURRENT head, so reaching a
+            # frozen boundary means first pulling past everything logged since the
+            # freeze. Without this an old test set can never grow: every fetched
+            # round is newer than the boundary and gets skipped.
+            behind = 0
+            if boundary is not None:
+                behind = int(max(0.0, time.time() - boundary) / 3600.0
+                             * ROUNDS_PER_HOUR)
+                print(f"       frozen head is {(time.time()-boundary)/3600:.1f} h old, "
+                      f"so ~{behind} rounds must be skipped to reach it")
+            per_run = int((rounds + behind) / 2) + 400   # two validators, plus slack
             if sh([sys.executable, "build_dataset.py", "--versions", "0.0.17",
                    "--limit", str(per_run), "--workers", "2", "--keep-answers",
-                   "--out", dataset]):
+                   "--out", tmp]):
                 return 1
-            manifest = os.path.join(DATA, "testset.json")
-            rows = [json.loads(l) for l in open(dataset)]
-            stamps = sorted(r["timestamp"] for r in rows if r.get("timestamp"))
+
+            merged = dict(existing)
+            added = skipped = 0
+            with open(tmp) as f:
+                for line in f:
+                    r = json.loads(line)
+                    if r["uuid"] in merged:
+                        continue
+                    if boundary is not None and (r.get("timestamp") or 0) > boundary:
+                        skipped += 1          # newer than the frozen head: not ours
+                        continue
+                    merged[r["uuid"]] = r
+                    added += 1
+            os.unlink(tmp)
+
+            rows = sorted(merged.values(), key=lambda r: r.get("timestamp") or 0)
+            with open(dataset, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r, separators=(",", ":")) + "\n")
+
+            stamps = [r["timestamp"] for r in rows if r.get("timestamp")]
+            head_ts = boundary if boundary is not None else max(stamps)
             json.dump({"rounds": len(rows),
-                       "first_round_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                        time.gmtime(stamps[0])),
-                       "last_round_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                       time.gmtime(stamps[-1])),
-                       "span_hours": round((stamps[-1] - stamps[0]) / 3600, 2),
-                       "built_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                       "first_round_utc": _utc(min(stamps)),
+                       "last_round_utc": _utc(max(stamps)),
+                       "span_hours": round((max(stamps) - min(stamps)) / 3600, 2),
+                       "frozen_head_ts": head_ts,
+                       "frozen_head_utc": _utc(head_ts),
+                       "built_utc": (frozen or {}).get("built_utc") or _utc(time.time()),
+                       "last_grown_utc": _utc(time.time()),
                        "uuids_sha1": _digest(rows)},
                       open(manifest, "w"), indent=1)
-            print(f"  test set frozen: {len(rows)} rounds -> {manifest}")
+            if existing:
+                print(f"  kept {len(existing)} existing rounds, added {added} older "
+                      f"ones, ignored {skipped} newer than the frozen head")
+            print(f"  test set: {len(rows)} rounds, head frozen at {_utc(head_ts)} "
+                  f"-> {manifest}")
 
     if "selftest" in want:
-        # The regression needs real rounds. Without an argument it falls back to
-        # /tmp/sn83ref_answers.jsonl, which nothing creates, so `--stage selftest`
-        # died on a fresh checkout before any invariant ran.
         if os.path.exists(dataset):
-            rc = sh([sys.executable, "test_reward_reference.py", dataset, "300"])
+            if sh([sys.executable, "test_reward_reference.py", dataset]):
+                print("\nreward_reference regression FAILED — stopping")
+                return 1
         else:
-            print("\n[skip] reward_reference — no dataset yet; it is checked once "
-                  "stage 2 has run")
-            rc = 0
-        if rc:
-            print("\nreward_reference regression FAILED — stopping")
-            return 1
+            print(f"\n[skip] reward_reference — no dataset yet at {dataset}; "
+                  f"it is checked once stage 2 has run")
         rc = sh([sys.executable, "test_fleet_sim.py"])
         if rc == 2:
             print("  (selftest needs a solve cache; it will be checked after stage 4)")
@@ -190,9 +237,8 @@ def main():
               f"(~{max(0, rounds-done)*SECONDS_PER_ROUND/3600:.1f} h left)")
         if sh([sys.executable, "fleet_sim.py", "--solve",
                "--rounds", str(rounds), "--sizes", *[str(x) for x in args.sizes],
-               "--solver", args.solver, "--dataset", dataset,
-               "--latency-s", str(args.latency_s),
-               "--metagraph", meta, "--cache", cache]):
+               "--solver", args.solver, "--latency-s", str(args.latency_s),
+               "--dataset", dataset, "--metagraph", meta, "--cache", cache]):
             return 1
         if sh([sys.executable, "test_fleet_sim.py"]):
             print("\ninvariants FAILED against the real cache — stopping")

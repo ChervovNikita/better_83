@@ -42,6 +42,11 @@ from _common import DATA_DIR
 
 IMMUNITY_BLOCKS = 6000
 REF_R = 1.5
+# MinerSelector._filter_validators skips a uid while
+# current_block - last_update <= epoch_length, so a freshly registered neuron is
+# not queried at all for its first epoch: 361 blocks x 12s = 72.2 min.
+WARMUP_BLOCKS = 361
+BLOCK_S = 12.0
 
 
 def selection_p(difficulty):
@@ -112,10 +117,10 @@ def solve_phase(rounds, k, solver, latency_s, cache_path):
         for i, rec in enumerate(todo, 1):
             A = np.array(GraphCodec().decode_matrix(rec["matrix_b92"]), dtype=np.uint8)
             t = time.time()
-            # A constant round-trip reserve, matching score_submission.py. A
-            # proportional 0.88 scale hands a 6 s task 5.28 s when deployment
-            # leaves it 4.0 s -- 32% too much, in the regime the solver is
-            # weakest. Same model on both sides or the fleet answer is inflated.
+            # deadline minus a CONSTANT round-trip reserve. A fraction of the
+            # deadline is wrong in both directions: it hands a 6s task 5.28s (32%
+            # more than deployment allows, and 6s/7.5s are 35% of rounds) while
+            # starving a 30s one of 1.6s it would really have.
             cl = solve_many(A, max(0.5, rec["time_limit"] - latency_s), k)
             row = {"uuid": rec["uuid"],
                    "cliques": [sorted(int(v) for v in c) for c in cl],
@@ -175,12 +180,18 @@ def worst_alive(streams, alive, joined, now, immunity_s, alpha=0.01):
 
 
 def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
-           apply_dereg=True, null=False, sample="real"):
+           apply_dereg=True, null=False, sample="real",
+           warmup_s=WARMUP_BLOCKS * BLOCK_S):
     """Replay the real rounds in order, with our fleet in place of N miners.
 
     Identity is the HOTKEY, not the uid slot, because slots get recycled. Three
     things happen as the replay walks forward:
 
+      * a freshly registered neuron is not queried for its first epoch (361
+        blocks, ~72 min), because MinerSelector filters on
+        current_block - last_update <= epoch_length. That applies to our fleet
+        at t0 and to every mid-replay registrant, and skipping it biases the
+        early EMA upward.
       * our fleet answers the rounds it is sampled into. With sample="real" we do
         not re-roll that: we take over specific uid SLOTS, and the log already
         records whether each slot was queried in each round. Selection is
@@ -276,19 +287,29 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
                     f"population {len(alive)} exceeds {n_slots} miner slots at round {t}")
 
         d = rec["difficulty"]
+        # The log is ground truth: a hotkey we first observe at time T was
+        # registered at least a warmup earlier, because it could not have been
+        # queried before that. Applying warmup to the field would double-count
+        # the delay and delete answers that really happened.
         survivors = [a for a in rec["answers"] if a["hk"] in alive]
         sizes = [len(a["clique"]) for a in survivors]
         valid = [1 if a["opt"] > 0 else 0 for a in survivors]
         keys = [tuple(sorted(a["clique"])) for a in survivors]
         idents = [a["hk"] for a in survivors]
 
+        def warm(ident):
+            """Past the first-epoch filter? Only meaningful for our own fleet."""
+            return now - joined.get(ident, -1e18) > warmup_s
+
         if sample == "real":
             # the slot was queried this round iff it appears in the log
             queried = {a["uid"] for a in rec["answers"]}
-            picked = [o for o in our_ids if o in alive and our_slot[o] in queried]
+            picked = [o for o in our_ids
+                      if o in alive and warm(o) and our_slot[o] in queried]
         else:
             p = selection_p(d)
-            picked = [o for o in our_ids if o in alive and rng.random() < p]
+            picked = [o for o in our_ids
+                      if o in alive and warm(o) and rng.random() < p]
         pool = cache.get(rec["uuid"], {}).get("cliques", [])
         ok = validity.get(rec["uuid"], [])
         for j, o in enumerate(picked):
@@ -454,8 +475,10 @@ def main():
     ap.add_argument("--solver", default="fleet_solver:solve_many",
                     help="module:func with signature (A, time_limit, k) -> list of cliques")
     ap.add_argument("--latency-s", type=float, default=2.0,
-                    help="seconds reserved on every task for the request/response "
-                         "round trip; the solver is given time_limit - this")
+                    help="seconds reserved for the request/response round trip. A "
+                         "constant, not a fraction: the validator's timeout covers "
+                         "one HTTP exchange whose cost does not scale with the "
+                         "deadline.")
     ap.add_argument("--solve", action="store_true",
                     help="run the (slow) solve phase; otherwise replay the cache")
     ap.add_argument("--seed", type=int, default=8383)
@@ -520,6 +543,12 @@ def main():
               file=sys.stderr)
     print(f"  ~{per_uid:.0f} samples per simulated hotkey "
           f"(the live field rests on ~595)", file=sys.stderr)
+    warm_h = WARMUP_BLOCKS * BLOCK_S / 3600.0
+    if span_h and span_h <= warm_h:
+        print(f"  WARNING: the whole {span_h:.2f} h window is inside the "
+              f"{warm_h*60:.0f} min registration warmup (MinerSelector skips a uid "
+              f"while current_block - last_update <= 361), so our fleet is never "
+              f"queried and every score below is 0.", file=sys.stderr)
     if per_uid < 150:
         print(f"  WARNING: {per_uid:.0f} samples per hotkey is far too few. Our fleet's "
               f"scores are then mostly noise, and because the weight curve is a rank "
@@ -649,6 +678,11 @@ def main():
         print(f"  {b['rank']:>5} {b['uid']:>4} {b['score']:>8.4f} {b['weight']:>9.5f}  "
               f"{'>>> OURS' if b['ours'] else b['who'][:12]}")
     print(f"\n  full per-identity scores and every deregistration event: {out}")
+    print("\n  caveats: a/day is GROSS — no registration burn, no rate limit, so it "
+          "is not a\n           break-even figure. weights[0]=0 holds only while "
+          "LAMBDA_WEIGHTS==1.0\n           (it is a burn target and can change). "
+          "Emission is a weight-share proxy:\n           Yuma consensus across the "
+          "seven validators is not modelled.")
     return 0
 
 
