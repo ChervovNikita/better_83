@@ -375,9 +375,17 @@ def score_vector(sc, meta, victim_uids, our_ids, alive, hk_uid=None):
 
     if hk_uid is None:
         hk_uid = {m["hotkey"]: m["uid"] for m in meta["miners"]}
-    for ident in sc:
+    # ALIVE identities claim their slot first. `sc` also holds identities that were
+    # DEREGISTERED mid-replay, and they still map to the uid they used to occupy --
+    # so iterating in stream order let a retired hotkey reserve the very slot its
+    # replacement needed, and the live registrant was then homeless and tripped the
+    # assertion below. On chain the newcomer owns that uid and the evicted hotkey
+    # owns nothing, so the live claim must win.
+    for ident in sorted(sc, key=lambda i: i not in alive):
         if ident in taken:
             continue
+        if ident not in alive:
+            continue          # deregistered: on chain it owns no uid at all
         u = hk_uid.get(ident)
         if u is not None and u not in reserved:
             taken[ident] = u
