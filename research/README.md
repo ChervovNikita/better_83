@@ -41,9 +41,11 @@ Everything below is detail. `--hours` is the dial: rounds arrive at ~105/h, the
 solve costs ~12s each and is resumable, and below 20 h (the immunity window) the
 `survived` column is vacuous. 24 h = 2,520 rounds ≈ 8.4 h of solving.
 
-The test set freezes on first build (`data/testset.json` records the span and a
-sha1 of the round uuids); growing it is safe, redrawing needs `--force` and
-invalidates earlier numbers. `a/day` prints `--` when the result falls inside the
+The test set freezes on first build. `data/testset.json` records the span, a sha1
+of the round uuids, and the **frozen head** — growth only ever extends
+*backwards* past that boundary, so every round you have already scored stays in
+the set and no newer ones sneak in. Redrawing needs `--force` and invalidates
+earlier numbers. `a/day` prints `--` when the result falls inside the
 zero-skill null, which means no result rather than a small one.
 
 ## The saturation result
