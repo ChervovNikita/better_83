@@ -132,8 +132,12 @@ def main():
         for o in oid:
             for x in st[o]:
                 per_round[o].append(x)
-        flat = np.array(ours_stream)
-        bs = [flat[rng.integers(0, len(flat), len(flat))].mean()
+        # CI for the MEDIAN ACROSS HOTKEYS, which is the reported statistic. An
+        # earlier version bootstrapped the pooled answer stream and reported its
+        # MEAN interval next to a median point estimate -- the two are different
+        # quantities, and the interval did not even bracket the point.
+        ph = np.array(per_hotkey)
+        bs = [float(np.median(ph[rng.integers(0, len(ph), len(ph))]))
               for _ in range(args.boot)]
         lo, hi = np.percentile(bs, [2.5, 97.5])
         beat = "YES" if ours > fmed else "no"
@@ -144,7 +148,7 @@ def main():
                         ci=[float(lo), float(hi)], field_median=fmed,
                         beats_field_median=bool(ours > fmed), n_zero_hotkeys=n_zero,
                         ranks=ranks, share=share, shift=shift, n_alive=len(vec),
-                        n_our_samples=len(flat)))
+                        n_our_samples=len(ours_stream)))
     dest = os.path.join(DATA_DIR, "asymptotic_results.json")
     json.dump(out, open(dest, "w"), indent=1)
     print(f"\nconverged means, not a short-window EMA: this is where the score goes,")
