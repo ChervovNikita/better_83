@@ -233,6 +233,7 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
     # simulator displaced nobody.
     retired = set(victim_hotkeys)
     n_slots = len(meta["miners"])
+    rejected = 0        # registrations the chain could not place: all slots immune
 
     for t, rec in enumerate(rounds):
         now = rec.get("timestamp") or (t0 + t * 34.0)      # ~34s median round gap
@@ -252,9 +253,15 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
                     # then the eviction falls to the worst - which can be us.
                     evicted = prev if prev in alive else worst_alive(
                         streams, alive, joined, now, immunity_s)
-                    if evicted is not None:
-                        alive.discard(evicted)
-                        retired.add(evicted)
+                    if evicted is None:
+                        # Every neuron is inside immunity, so the chain has no slot
+                        # to recycle and rejects the registration. Admitting anyway
+                        # grew the population past the uid count.
+                        rejected += 1
+                        uid_seen[uid] = hk
+                        continue
+                    alive.discard(evicted)
+                    retired.add(evicted)
                     alive.add(hk)
                     joined[hk] = now
                     events.append({"round": t, "t": now, "uid": uid,
@@ -301,6 +308,10 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
         for i, r in zip(idents, rewards):
             streams[i].append(float(r))
 
+    if rejected:
+        print(f"  note: {rejected} registrations rejected - every neuron was inside "
+              f"immunity, which is what the chain does when no slot can be recycled",
+              file=sys.stderr)
     return (streams, victim_uids, our_ids, alive, events,
             {h: u for u, h in uid_hotkey_now.items()})
 

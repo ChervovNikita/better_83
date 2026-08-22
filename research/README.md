@@ -49,6 +49,25 @@ The strongest of them is `N=0 reproduces the validator's own logged rewards`:
 with no fleet inserted and nobody displaced, the replay must return the log
 byte for byte.
 
+## The saturation result
+
+Taking every slot is the cheapest way to find out what actually limits a fleet.
+Two hard limits fall out, neither of them the scoring mechanism:
+
+- **You cannot take the whole subnet.** Immune UIDs are protected, so the largest
+  instantaneous fleet is the non-immune count — 230 of 249 today. `pick_victims`
+  refuses anything larger rather than pretending.
+- **The clique pool is the binding constraint.** With the fleet holding every
+  displaceable slot, the hotkeys the pool can serve bunch tightly (first 4: mean
+  2.638, sd 0.214 — everyone runs the same solver, so they differ only in which
+  clique they were handed), while the remaining 226 average 0.296 and **131 score
+  exactly zero**. They are queried and have nothing to answer with.
+
+`solve_many` currently yields a median of **4** distinct cliques per round against
+20 requested, so a fleet past ~4 hotkeys is dead weight. Fleet scale and collision
+avoidance turn out to be the same capability: both need the solver to emit many
+distinct maximum cliques, and neither is reachable without it.
+
 ## Layout
 
 | file | what it does |

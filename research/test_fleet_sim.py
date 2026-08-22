@@ -222,6 +222,56 @@ def t_immunity(rounds, cache, meta, validity):
     return ok
 
 
+def t_saturation(rounds, cache, meta, validity):
+    """Take EVERY slot. Nothing should break, and the outcome should be flat.
+
+    With the whole subnet ours the field is only us, so scores should bunch near
+    one value; anyone far below it is starved of cliques, not outcompeted.
+    """
+    block = meta["block"]
+    free = [m for m in meta["miners"]
+            if block - m["block_at_registration"] >= F.IMMUNITY_BLOCKS]
+    total = len(meta["miners"])
+    # you cannot take the whole subnet: immune UIDs are protected
+    try:
+        F.pick_victims(meta, total)
+        check("N=all is refused while any UID is immune", len(free) == total)
+    except SystemExit:
+        check("N=all is refused while any UID is immune", True,
+              f"{total - len(free)} of {total} UIDs immune; max fleet is {len(free)}")
+    N = len(free)
+    st, vu, oid, alive, ev, hku = F.replay(rounds, cache, meta, N, 8383, validity,
+                                           sample="real")
+    ok = check("N=max: population conserved", len(alive) == total,
+               f"|alive|={len(alive)} vs {total} slots")
+    ok &= check("N=max: only the immune field survives",
+                len(alive - set(oid)) == total - N,
+                f"{len(alive - set(oid))} field identities left, "
+                f"{total - N} immune expected")
+    sc = F.ema_scores(st)
+    pool = [len(cache[r["uuid"]]["cliques"]) for r in rounds]
+    kmed = int(np.median(pool))
+
+    # Hotkeys are served pool[j] by rank j, so only the first ~kmed of the fleet
+    # get a clique in a typical round; the rest are queried and score zero. Judge
+    # the two groups separately or the pool limit masquerades as score spread.
+    served = np.array([sc[o] for o in oid[:kmed]])
+    starved = np.array([sc[o] for o in oid[kmed:]])
+    ok &= check("N=max: the hotkeys the pool can serve bunch near one value",
+                served.size == 0 or float(np.std(served)) < 0.30,
+                f"first {served.size}: mean {served.mean() if served.size else 0:.3f}, "
+                f"sd {np.std(served) if served.size else 0:.3f}")
+    ok &= check("N=max: the rest are starved, not outcompeted",
+                starved.size == 0 or float(np.mean(starved)) < served.mean() if served.size else True,
+                f"remaining {starved.size}: mean {np.mean(starved) if starved.size else 0:.3f}")
+    print(f"       clique pool median {kmed}/round, so a fleet past ~{kmed} hotkeys "
+          f"is dead weight: {int((np.array([sc[o] for o in oid]) == 0).sum())} of {N} "
+          f"scored exactly 0")
+    print(f"       deregistrations in this window: {len(ev)} "
+          f"(needs a >20 h window to be non-zero)")
+    return ok
+
+
 def t_rejects_old_schema(rounds, cache, meta, validity):
     """A dataset without hotkeys must be refused, not silently scored at 100%."""
     stripped = []
@@ -259,6 +309,8 @@ def main():
     t_null_varies(rounds, cch, meta, validity)
     t_real_sampling_deterministic(rounds, cch, meta, validity)
     t_immunity(rounds, cch, meta, validity)
+    print("\nsaturation (take every slot)")
+    t_saturation(rounds, cch, meta, validity)
     t_rejects_old_schema(rounds, cch, meta, validity)
 
     print()
