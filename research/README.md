@@ -27,41 +27,24 @@ Two facts drive everything here:
 ## Start here
 
 ```bash
-python3 run.py --hours 24 --dry-run     # the plan and the ETA
-python3 run.py --stage selftest         # verify the code before trusting it
-python3 run.py --hours 24               # metagraph -> data -> selftest -> solve -> simulate
+pip install -r requirements.txt && export WANDB_API_KEY=<key>
+python3 run.py --stage selftest      # 30s: is the code sound?
+python3 run.py --hours 24            # everything: data -> solve -> simulate
 ```
 
-`run.py` is the entry point. Each stage is skipped when its output is already
-complete, and the solve stage — the only slow one — is resumable, so an
-interrupted run costs only what is left. `--hours` is the honest unit: rounds
-arrive at ~105/h, and **nothing about deregistration is testable below 20 h**,
-which is the immunity window; `run.py` says so rather than letting you read a
-vacuous `survived` column as a result.
+Point it at your own solver with `--solver mymodule:solve_many`, where
+`solve_many(A, time_limit, k)` returns up to `k` distinct maximal cliques from a
+single call — the validator broadcasts one graph to every hotkey it queries, so a
+fleet gets one solve budget, not N.
 
-The test set is **frozen on first build**. `build_dataset` pulls `head - limit`
-and the head advances ~105 rounds/h, so a rebuild would silently move the ground
-under every comparison; `run.py` therefore skips the stage once the file is long
-enough and records `data/testset.json` — round count, UTC span, and a sha1 over
-the uuids — so two results can be checked against the same corpus. Growing it is
-safe (older rounds are appended). Redrawing needs `--force`, and invalidates
-every earlier number.
+Everything below is detail. `--hours` is the dial: rounds arrive at ~105/h, the
+solve costs ~12s each and is resumable, and below 20 h (the immunity window) the
+`survived` column is vacuous. 24 h = 2,520 rounds ≈ 8.4 h of solving.
 
-The simulation ends with the **full leaderboard**: every scoring identity's final
-EMA score and chain weight, ours and the field's alike, ranked. That is the vector
-`set_weights` consumed, so it answers "where did we land among the miners" rather
-than just "what did we score". It lands in `data/fleet_sim_results.json` together
-with every deregistration event.
-
-`test_fleet_sim.py` is the gate. It runs inside `run.py` before the expensive
-stage and again against the real cache afterwards, and a failure stops the
-pipeline. Every check in it exists because something actually broke — the
-simulator once re-admitted the miners it had just displaced, once reported a
-100% fleet share on a dataset missing hotkeys, once wrote real scores into
-validator slots, and once flattened its own zero-skill control to a constant.
-The strongest of them is `N=0 reproduces the validator's own logged rewards`:
-with no fleet inserted and nobody displaced, the replay must return the log
-byte for byte.
+The test set freezes on first build (`data/testset.json` records the span and a
+sha1 of the round uuids); growing it is safe, redrawing needs `--force` and
+invalidates earlier numbers. `a/day` prints `--` when the result falls inside the
+zero-skill null, which means no result rather than a small one.
 
 ## The saturation result
 
