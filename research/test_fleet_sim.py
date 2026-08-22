@@ -179,6 +179,12 @@ def t_null_varies(rounds, cache, meta, validity):
         w, g, h = F.set_weights(vec)
         shares.append(float(w[ours].sum()))
     spread = max(shares) - min(shares)
+    span_s = rounds[-1]["timestamp"] - rounds[0]["timestamp"]
+    if span_s <= F.WARMUP_BLOCKS * F.BLOCK_S:
+        print(f"  [skip] null control varies — the whole window is inside the "
+              f"{F.WARMUP_BLOCKS*F.BLOCK_S/60:.0f} min warmup, so no fleet answers "
+              f"exist to vary")
+        return True
     return check("null control varies across seeds", spread > 1e-6,
                  f"shares {min(shares):.5%}..{max(shares):.5%}")
 
@@ -222,6 +228,25 @@ def t_immunity(rounds, cache, meta, validity):
     return ok
 
 
+def t_warmup(rounds, cache, meta, validity):
+    """A fresh registration is not queried for its first epoch (361 blocks)."""
+    span_s = rounds[-1]["timestamp"] - rounds[0]["timestamp"]
+    st, vu, oid, alive, ev, hku = F.replay(rounds, cache, meta, 5, 8383, validity,
+                                           sample="real")
+    silent = all(not st[o] for o in oid)
+    ok = check("fleet is silent during its warmup",
+               silent if span_s <= F.WARMUP_BLOCKS * F.BLOCK_S else True,
+               f"window {span_s/60:.0f} min vs {F.WARMUP_BLOCKS*F.BLOCK_S/60:.0f} min "
+               f"warmup; {sum(1 for o in oid if st[o])}/5 answered")
+    # and it does answer once the warmup is disabled
+    st2, *_ = F.replay(rounds, cache, meta, 5, 8383, validity, sample="real",
+                       warmup_s=0.0)
+    ok &= check("fleet answers once past the warmup",
+                any(st2[o] for o in oid),
+                f"{sum(1 for o in oid if st2[o])}/5 answered with warmup_s=0")
+    return ok
+
+
 def t_saturation(rounds, cache, meta, validity):
     """Take EVERY slot. Nothing should break, and the outcome should be flat.
 
@@ -251,6 +276,11 @@ def t_saturation(rounds, cache, meta, validity):
     sc = F.ema_scores(st)
     pool = [len(cache[r["uuid"]]["cliques"]) for r in rounds]
     kmed = int(np.median(pool))
+    span_s = rounds[-1]["timestamp"] - rounds[0]["timestamp"]
+    if span_s <= F.WARMUP_BLOCKS * F.BLOCK_S:
+        print(f"  [skip] saturation scores — window is inside the warmup; "
+              f"population and refusal checks above still apply")
+        return ok
 
     # Hotkeys are served pool[j] by rank j, so only the first ~kmed of the fleet
     # get a clique in a typical round; the rest are queried and score zero. Judge
@@ -309,6 +339,8 @@ def main():
     t_null_varies(rounds, cch, meta, validity)
     t_real_sampling_deterministic(rounds, cch, meta, validity)
     t_immunity(rounds, cch, meta, validity)
+    print("\nwarmup")
+    t_warmup(rounds, cch, meta, validity)
     print("\nsaturation (take every slot)")
     t_saturation(rounds, cch, meta, validity)
     t_rejects_old_schema(rounds, cch, meta, validity)

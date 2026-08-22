@@ -91,6 +91,14 @@ def main():
               f"window, so the fleet can never be evicted and 'survived' will be\n"
               f"        vacuous. Use --hours {IMMUNITY_H:.0f} or more to test "
               f"deregistration.")
+    elif args.hours < 3 * IMMUNITY_H:
+        exposed = args.hours - IMMUNITY_H
+        print(f"\n  NOTE: immunity runs {IMMUNITY_H:.0f} h from join, so "
+              f"--hours {args.hours:.0f} leaves only {exposed:.0f} h of exposure. At "
+              f"~20 registrations/day\n        that is ~{exposed/24*20*10/249:.2f} "
+              f"expected evictions of a 10-hotkey fleet — 'survived' will read N/N\n"
+              f"        regardless of skill. ~72 h is the first window where it "
+              f"discriminates.")
 
     want = STAGES[STAGES.index(args.stage or args.from_stage):] if not args.stage \
         else [args.stage]
@@ -140,9 +148,13 @@ def main():
             print(f"  test set frozen: {len(rows)} rounds -> {manifest}")
 
     if "selftest" in want:
-        if sh([sys.executable, "test_reward_reference.py"]):
-            print("\nreward_reference regression FAILED — stopping")
-            return 1
+        if os.path.exists(dataset):
+            if sh([sys.executable, "test_reward_reference.py", dataset]):
+                print("\nreward_reference regression FAILED — stopping")
+                return 1
+        else:
+            print(f"\n[skip] reward_reference — no dataset yet at {dataset}; "
+                  f"it is checked once stage 2 has run")
         rc = sh([sys.executable, "test_fleet_sim.py"])
         if rc == 2:
             print("  (selftest needs a solve cache; it will be checked after stage 4)")
@@ -157,8 +169,8 @@ def main():
               f"(~{max(0, rounds-done)*SECONDS_PER_ROUND/3600:.1f} h left)")
         if sh([sys.executable, "fleet_sim.py", "--solve",
                "--rounds", str(rounds), "--sizes", *[str(x) for x in args.sizes],
-               "--solver", args.solver, "--dataset", dataset,
-               "--metagraph", meta, "--cache", cache]):
+               "--solver", args.solver, "--latency-s", str(args.latency_s),
+               "--dataset", dataset, "--metagraph", meta, "--cache", cache]):
             return 1
         if sh([sys.executable, "test_fleet_sim.py"]):
             print("\ninvariants FAILED against the real cache — stopping")
