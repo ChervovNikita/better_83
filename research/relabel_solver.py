@@ -80,3 +80,17 @@ if __name__ == "__main__":
         mx = max((len(c) for c in cl), default=0)
         print(f"n={r['n']:>4} tl={r['time_limit']:>4} best={r['best_size']:>3} -> "
               f"{len(cl):>3} distinct at size {mx} in {time.time()-t:.1f}s")
+
+# MEASURED RESULT (2026-08-22), paired A/B over 40 rounds at k=40, 14 threads:
+#
+#   baseline      18.9 optima/round   best size 40/40
+#   relabel R=3   21.6 (+2.6, t=+4.1) best size 40/40
+#   relabel R=6   21.7 (+2.8, t=+4.4) best size 40/40
+#   relabel R=12  22.6 (+3.6, t=+3.7) best size 39/40
+#
+# Real, significant, and ~5x too small: an N=40 fleet needs a pool of 40.
+#
+# The 3.34x in the docstring above is WRONG as an argument for this. relabel_reach.py
+# divides the budget by K for BOTH arms, so it compared a union of 8 passes against
+# ONE pass at 1/8 budget. That ratio is close to arithmetic, not a finding. Against a
+# full-budget baseline the honest gain is the +15-20% measured here.
