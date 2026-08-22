@@ -90,7 +90,7 @@ def pick_victims(meta, n):
 
 # ---------------------------------------------------------------- solve phase
 
-def solve_phase(rounds, k, solver, time_scale, cache_path):
+def solve_phase(rounds, k, solver, latency_s, cache_path):
     """One solver call per round for up to k distinct cliques. Resumable."""
     import importlib
     mod, fn = solver.split(":")
@@ -112,7 +112,11 @@ def solve_phase(rounds, k, solver, time_scale, cache_path):
         for i, rec in enumerate(todo, 1):
             A = np.array(GraphCodec().decode_matrix(rec["matrix_b92"]), dtype=np.uint8)
             t = time.time()
-            cl = solve_many(A, rec["time_limit"] * time_scale, k)
+            # A constant round-trip reserve, matching score_submission.py. A
+            # proportional 0.88 scale hands a 6 s task 5.28 s when deployment
+            # leaves it 4.0 s -- 32% too much, in the regime the solver is
+            # weakest. Same model on both sides or the fleet answer is inflated.
+            cl = solve_many(A, max(0.5, rec["time_limit"] - latency_s), k)
             row = {"uuid": rec["uuid"],
                    "cliques": [sorted(int(v) for v in c) for c in cl],
                    "elapsed": time.time() - t}
@@ -449,7 +453,9 @@ def main():
     ap.add_argument("--cache", default=os.path.join(DATA_DIR, "sim_cliques.jsonl"))
     ap.add_argument("--solver", default="fleet_solver:solve_many",
                     help="module:func with signature (A, time_limit, k) -> list of cliques")
-    ap.add_argument("--time-scale", type=float, default=0.88)
+    ap.add_argument("--latency-s", type=float, default=2.0,
+                    help="seconds reserved on every task for the request/response "
+                         "round trip; the solver is given time_limit - this")
     ap.add_argument("--solve", action="store_true",
                     help="run the (slow) solve phase; otherwise replay the cache")
     ap.add_argument("--seed", type=int, default=8383)
@@ -526,7 +532,7 @@ def main():
               f"that cannot exist. Diagnostic only.", file=sys.stderr)
 
     if args.solve:
-        solve_phase(rounds, kmax, args.solver, args.time_scale, args.cache)
+        solve_phase(rounds, kmax, args.solver, args.latency_s, args.cache)
 
     cache = {}
     with open(args.cache) as f:

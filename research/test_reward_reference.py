@@ -25,9 +25,11 @@ class _Graph:
         self.number_of_nodes, self.adjacency_list = n, adj
 
 
-def main(path):
+def main(path, limit=0):
     recs = [json.loads(l) for l in open(path) if l.strip()]
     recs = [r for r in recs if r.get("answers")]
+    if limit:                      # keep the regression a seconds-long check
+        recs = recs[:limit]
     checked = worst = 0
     for rec in recs:
         M = np.array(GraphCodec().decode_matrix(rec["matrix_b92"]), dtype=np.uint8)
@@ -59,4 +61,5 @@ def main(path):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "/tmp/sn83ref_answers.jsonl"))
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "/tmp/sn83ref_answers.jsonl",
+                  int(sys.argv[2]) if len(sys.argv) > 2 else 0))

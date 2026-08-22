@@ -49,6 +49,22 @@ def _digest(rows):
     return h.hexdigest()[:16]
 
 
+def _schema_ok(path):
+    """First record must carry a timestamp and per-answer hotkeys."""
+    try:
+        with open(path) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                ans = r.get("answers") or []
+                return bool(r.get("timestamp")) and bool(ans) and \
+                    any(a.get("hk") for a in ans)
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def count_lines(path):
     if not os.path.exists(path):
         return 0
@@ -109,6 +125,14 @@ def main():
 
     if "dataset" in want:
         have = count_lines(dataset)
+        # A line count is not enough: an older dataset can satisfy it and still
+        # lack the per-answer hotkeys and timestamps the replay needs. That file
+        # would sail through here, cost a full solve, and only fail at simulate.
+        if have and not _schema_ok(dataset):
+            print(f"\n[stale] {dataset} predates the hk/timestamp schema — moving "
+                  f"it aside and rebuilding")
+            os.rename(dataset, dataset + ".oldschema")
+            have = 0
         # The test set is FROZEN once built. build_dataset pulls `head - limit`,
         # and head advances ~105 rounds/h, so rebuilding would silently move the
         # ground under every comparison. Growing it is fine (the extra rounds are
@@ -140,7 +164,16 @@ def main():
             print(f"  test set frozen: {len(rows)} rounds -> {manifest}")
 
     if "selftest" in want:
-        if sh([sys.executable, "test_reward_reference.py"]):
+        # The regression needs real rounds. Without an argument it falls back to
+        # /tmp/sn83ref_answers.jsonl, which nothing creates, so `--stage selftest`
+        # died on a fresh checkout before any invariant ran.
+        if os.path.exists(dataset):
+            rc = sh([sys.executable, "test_reward_reference.py", dataset, "300"])
+        else:
+            print("\n[skip] reward_reference — no dataset yet; it is checked once "
+                  "stage 2 has run")
+            rc = 0
+        if rc:
             print("\nreward_reference regression FAILED — stopping")
             return 1
         rc = sh([sys.executable, "test_fleet_sim.py"])
@@ -158,6 +191,7 @@ def main():
         if sh([sys.executable, "fleet_sim.py", "--solve",
                "--rounds", str(rounds), "--sizes", *[str(x) for x in args.sizes],
                "--solver", args.solver, "--dataset", dataset,
+               "--latency-s", str(args.latency_s),
                "--metagraph", meta, "--cache", cache]):
             return 1
         if sh([sys.executable, "test_fleet_sim.py"]):
