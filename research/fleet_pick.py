@@ -1,43 +1,82 @@
 #!/usr/bin/env python3
-"""Pick one clique per hotkey so a fleet never self-collides.
+"""Assign one clique per queried hotkey, and size the solve to what is actually needed.
 
-Measured gain: coordinating N hotkeys over distinct cliques lifts sole-holder rate
-from 24.8% (every hotkey submits the natural endpoint) to 34.3%. It is the largest
-single improvement found in this project and needs no solver change.
+Two measured facts drive this module.
 
-Two schemes, and the difference is not cosmetic:
+**Never stay silent.** When the pool holds fewer cliques than the fleet has queried
+hotkeys, the surplus must still submit something. Returning [] is scored invalid and
+earns a hard 0; resubmitting a sibling's clique earns the full optimality term (~1.76)
+and merely shares the diversity term. Measured over 81 affected rounds (29.5% of all
+rounds, where 6.6 hotkeys are short on average): duplicating is worth **+12.15 total
+fleet reward per round and wins on 100% of them**. In the simulator this lifts an
+N=40 fleet's median from 1.8265 to 2.2502.
 
-  hash   AGENT.md's `hash(hotkey || uuid)`. Each miner picks independently, which is
-         correct when you do NOT control the other miners. But N independent hashes
-         into a pool of P collide by the birthday problem: at N=9, P=18.7 the expected
-         number of DISTINCT picks is only ~7.1, so ~2 hotkeys duplicate and each pays
-         1/2 diversity for nothing.
-
-  rank   the fleet owner assigns hotkey i the index i. Distinct by construction, zero
-         self-collision -- which is exactly what the 93-UID and 46-UID operators are
-         measured doing (12.1 answers -> 12.1 distinct cliques, 0 repeats in 2778
-         rounds).
-
-Use `rank` when you own the hotkeys. `hash` is the fallback for an uncoordinated
-miner, and it is strictly worse.
+**Do not solve for 40 when 9 are asked.** The validator samples each uid independently
+at P(difficulty), so a fleet of N gets Binomial(N, p) queries -- mean 8.9 for N=40,
+but ranging 0..19 and swinging with difficulty (12.1 at d=0.7, 3.3 at d=1.0). Asking
+the harvester for 40 distinct cliques on a round that will only query 3 wastes the
+deadline. `needed()` sizes the request from the difficulty the task itself carries.
 """
 import hashlib
+import math
+
+REFERENCE_R = 1.5          # MinerSelector.reference_r
 
 
-def pick(pool, uuid, hotkey, rank=None, fleet_size=None):
-    """Return this hotkey's clique from `pool` (a list of distinct cliques)."""
+def selection_p(difficulty):
+    """MinerSelector.miner_selection_probabilities -- uniform across uids."""
+    x_m = math.sqrt(1.0 + REFERENCE_R)
+    return 1.0 - math.exp(-max(0.0, x_m - float(difficulty) - 0.5))
+
+
+def needed(fleet_size, difficulty, safety=2.0, cap=None):
+    """How many DISTINCT cliques this round plausibly needs.
+
+    Binomial(fleet_size, p) queries arrive, so aim at the mean plus `safety` standard
+    deviations rather than at fleet_size. Overshooting wastes deadline; undershooting
+    forces duplicates, which cost only shared diversity -- so the asymmetry favours a
+    modest margin, not a large one.
+    """
+    n = max(int(fleet_size), 1)
+    p = selection_p(difficulty)
+    mean = n * p
+    sd = math.sqrt(max(n * p * (1.0 - p), 0.0))
+    k = int(math.ceil(mean + safety * sd))
+    k = max(1, min(k, n))
+    return min(k, cap) if cap else k
+
+
+def pick(pool, uuid, hotkey, rank=None):
+    """This hotkey's clique. Wraps on a short pool rather than returning nothing."""
     if not pool:
         return []
-    if rank is not None:
-        # Coordinated: distinct by construction. Rotate by the round so the same
-        # hotkey does not always take the same slot -- otherwise hotkey 0 eats every
-        # crowded natural endpoint and its score alone carries the whole penalty.
-        off = int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16)
-        return pool[(rank + off) % len(pool)]
-    h = hashlib.sha1(f"{hotkey}|{uuid}".encode()).hexdigest()
-    return pool[int(h[:8], 16) % len(pool)]
+    if rank is None:
+        h = hashlib.sha1(f"{hotkey}|{uuid}".encode()).hexdigest()
+        return pool[int(h[:8], 16) % len(pool)]
+    # Rotate by the round so hotkey 0 does not take the crowded natural endpoint
+    # every time and carry the whole collision penalty alone.
+    off = int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16)
+    return pool[(rank + off) % len(pool)]
 
 
-def assign(pool, uuid, hotkeys):
-    """Whole-fleet assignment: hotkey i gets a distinct clique while the pool lasts."""
-    return {hk: pick(pool, uuid, hk, rank=i) for i, hk in enumerate(hotkeys)}
+def assign(pool, uuid, hotkeys, ranks=None):
+    """Whole-fleet assignment: distinct while the pool lasts, then duplicates.
+
+    `hotkeys` should be the ones actually QUERIED this round. `ranks` lets a
+    coordinator pass stable per-hotkey indices; otherwise position is used.
+    """
+    if not pool:
+        return {hk: [] for hk in hotkeys}
+    out = {}
+    for i, hk in enumerate(hotkeys):
+        r = ranks[i] if ranks is not None else i
+        out[hk] = pick(pool, uuid, hk, rank=r)
+    return out
+
+
+def duplicates(assignment):
+    """How many hotkeys share a clique with a sibling -- the cost of a short pool."""
+    seen = {}
+    for hk, c in assignment.items():
+        seen.setdefault(tuple(c), []).append(hk)
+    return sum(len(v) - 1 for v in seen.values() if len(v) > 1)
