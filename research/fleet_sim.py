@@ -77,6 +77,24 @@ def score_round(sizes, valid, keys, difficulty):
     return optimality * (1 + difficulty) + diversity
 
 
+def occupants(rounds, meta):
+    """Who holds each uid AT THE START OF THE WINDOW, from the data, not the snapshot.
+
+    The metagraph is captured after the window, so a uid that changed hands in
+    between reads back its LATER occupant. Seeding from the snapshot silently
+    dropped the earlier miner's answers and broke the N=0 identity with the log.
+    Anything that needs to name the miner we displace must ask this, or it will
+    name a different hotkey than the one replay actually retired.
+    """
+    uid_hotkey = {}
+    for rec in rounds:
+        for a in rec["answers"]:
+            uid_hotkey.setdefault(a["uid"], a["hk"])
+    for m in meta["miners"]:                       # uids that never answered
+        uid_hotkey.setdefault(m["uid"], m["hotkey"])
+    return uid_hotkey
+
+
 def pick_victims(meta, n):
     """The n UIDs a fresh registration would displace, worst first.
 
@@ -164,8 +182,13 @@ def worst_alive(streams, alive, joined, now, immunity_s, alpha=0.01):
     Immunity is 6000 blocks of WALL CLOCK (~20 h), not a round count: rounds from
     two validators interleave at ~105/h, so counting rounds would misdate it.
     """
+    # Iterate in a STABLE order. `alive` is a set of hotkey strings and Python
+    # randomises string hashing per process, so set order -- and therefore which of
+    # several equally-worst identities got evicted -- changed on every run. Same
+    # seed, same data, different answer: the N=40 median wandered over ~0.04 between
+    # processes, which is the size of effects being measured here.
     best_id, best_score = None, None
-    for ident in alive:
+    for ident in sorted(alive, key=str):
         if now - joined.get(ident, -1e18) < immunity_s:
             continue
         xs = streams.get(ident, [])
@@ -181,7 +204,7 @@ def worst_alive(streams, alive, joined, now, immunity_s, alpha=0.01):
 
 def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
            apply_dereg=True, null=False, sample="real",
-           warmup_s=WARMUP_BLOCKS * BLOCK_S):
+           warmup_s=WARMUP_BLOCKS * BLOCK_S, picker=None):
     """Replay the real rounds in order, with our fleet in place of N miners.
 
     Identity is the HOTKEY, not the uid slot, because slots get recycled. Three
@@ -213,6 +236,10 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
             "tracked and score_vector would keep only our fleet - which reports a "
             "100% share. Rebuild with build_dataset.py --keep-answers.")
     rng = np.random.default_rng(seed)
+    pool_index = {}
+    for _u, _rec in cache.items():
+        pool_index[_u] = {tuple(sorted(int(v) for v in c)): i
+                          for i, c in enumerate(_rec.get("cliques", []))}
     victim_uids = pick_victims(meta, N)
 
     # Who occupies each uid AT THE START OF THE WINDOW, taken from the data, not
@@ -220,19 +247,29 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
     # answered during the window and was deregistered before the snapshot is
     # missing from it entirely — seeding `alive` from the snapshot silently
     # dropped those answers and broke the N=0 identity with the log.
-    uid_hotkey_now = {}
-    for rec in rounds:
-        for a in rec["answers"]:
-            uid_hotkey_now.setdefault(a["uid"], a["hk"])
-    for m in meta["miners"]:                       # uids that never answered
-        uid_hotkey_now.setdefault(m["uid"], m["hotkey"])
+    uid_hotkey_now = occupants(rounds, meta)
     victim_hotkeys = {uid_hotkey_now[u] for u in victim_uids if u in uid_hotkey_now}
 
     our_ids = [f"OURS-{i}" for i in range(N)]
     our_slot = dict(zip(our_ids, victim_uids))       # which uid each of ours holds
     alive = (set(uid_hotkey_now.values()) - victim_hotkeys) | set(our_ids)
     t0 = rounds[0].get("timestamp") or 0.0
-    joined = {ident: -1e18 for ident in alive}    # incumbents are long out of immunity
+    # Incumbents are NOT all long out of immunity. The metagraph records
+    # block_at_registration, and a uid registered within IMMUNITY_BLOCKS of the
+    # snapshot cannot be deregistered. Seeding every field hotkey at -1e18 made
+    # worst_alive treat all of them as evictable, and 14 of the 16 genuinely immune
+    # incumbents were displaced -- the very protection pick_victims refuses to
+    # violate when it chooses who we displace.
+    t_end = rounds[-1].get("timestamp") or (t0 + len(rounds) * 34.0)
+    joined = {ident: -1e18 for ident in alive}
+    # Key it by UID, not by hotkey: the chain protects the SLOT, and `alive` holds
+    # each uid's occupant as seen in the data, which need not be the hotkey the
+    # later snapshot records for it.
+    for m in meta["miners"]:                   # snapshot block ~ end of the window
+        hk = uid_hotkey_now.get(m["uid"], m["hotkey"])
+        if hk in joined:
+            age_blocks = int(meta["block"]) - int(m["block_at_registration"])
+            joined[hk] = t_end - age_blocks * BLOCK_S
     for o in our_ids:
         joined[o] = t0                            # we register at the first round
 
@@ -312,24 +349,40 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
                       if o in alive and warm(o) and rng.random() < p]
         pool = cache.get(rec["uuid"], {}).get("cliques", [])
         ok = validity.get(rec["uuid"], [])
+        if picker is not None and picked:
+            # The solver decides which hotkey submits what, including repeats and
+            # deliberate silence. It returns a list aligned with `picked`; an entry
+            # that is empty/None means that hotkey answers nothing.
+            chosen = picker(pool, rec["uuid"], list(picked))
+            for o, c in zip(picked, chosen):
+                if not c:
+                    sizes.append(0); valid.append(0); keys.append(("unserved", o))
+                else:
+                    t = tuple(sorted(int(v) for v in c))
+                    idx = pool_index.get(rec["uuid"], {}).get(t)
+                    sizes.append(len(t))
+                    valid.append(1 if (idx is not None and idx < len(ok) and ok[idx])
+                                 else (1 if idx is None else 0))
+                    keys.append(t)
+                idents.append(o)
+            rewards = score_round(sizes, valid, keys, d)
+            if null:
+                surv = [r for r, i in zip(rewards, idents)
+                        if not str(i).startswith("OURS-")]
+                if surv:
+                    rewards = [float(rng.choice(surv)) if str(i).startswith("OURS-")
+                               else r for r, i in zip(rewards, idents)]
+            for i, r in zip(idents, rewards):
+                streams[i].append(float(r))
+            continue
         for j, o in enumerate(picked):
             if j >= len(pool):
-                # Pool exhausted. Two behaviours:
-                #   silent    return [], which clique_scoring rejects -> a hard 0
-                #   duplicate resubmit a sibling's clique -> full optimality, and
-                #             diversity shared with that sibling
-                # SN83_FLEET_DUP=1 selects duplicate, which is what any real miner
-                # does: it holds a maximum clique and has no reason to withhold it.
-                # Measured over 81 affected rounds, duplicating is worth +12.15 total
-                # fleet reward and wins on 100% of them, because a duplicate still
-                # earns the whole optimality term (~1.76) while silence earns nothing.
-                if os.environ.get("SN83_FLEET_DUP") == "1" and pool:
-                    jj = j % len(pool); c = pool[jj]
-                    sizes.append(len(c))
-                    valid.append(1 if (jj < len(ok) and ok[jj]) else 0)
-                    keys.append(tuple(c))
-                else:
-                    sizes.append(0); valid.append(0); keys.append(("unserved", o))
+                # The PICKER returned nothing for this hotkey. The validator scores an
+                # empty maximum_clique as invalid and update_scores folds in a 0.0 --
+                # that is faithful and stays. What to submit when the pool runs short
+                # (stay silent, or repeat a sibling's clique) is a SOLVER decision, so
+                # it lives in the picker, not here. See --picker.
+                sizes.append(0); valid.append(0); keys.append(("unserved", o))
             else:
                 c = pool[j]
                 sizes.append(len(c))
@@ -383,7 +436,13 @@ def score_vector(sc, meta, victim_uids, our_ids, alive, hk_uid=None):
     vec = np.zeros(n)
     taken = {}
     for our, victim in zip(our_ids, victim_uids):
-        taken[our] = victim
+        # Only a fleet member that is STILL HERE holds its slot. Reserving for one
+        # the chain already deregistered kept its uid off the free list, so the
+        # registrant that displaced it had nowhere to go and the assertion below
+        # fired -- at N=20 exactly one of ours was evicted and exactly one live
+        # registrant went homeless.
+        if our in alive:
+            taken[our] = victim
     reserved = set(taken.values())
 
     if hk_uid is None:
@@ -503,6 +562,14 @@ def main():
     ap.add_argument("--solve", action="store_true",
                     help="run the (slow) solve phase; otherwise replay the cache")
     ap.add_argument("--seed", type=int, default=8383)
+    ap.add_argument("--picker", default=None,
+                    help="module:func deciding what each QUERIED hotkey submits, "
+                         "given (pool, uuid, hotkeys). Returns one clique per hotkey, "
+                         "in order; an empty entry means that hotkey answers nothing "
+                         "and is scored 0. This is where a fleet chooses to repeat a "
+                         "clique rather than go silent -- a solver decision, not the "
+                         "harness's. fleet_pick:picker duplicates, "
+                         "fleet_pick:picker_silent is the distinct-or-nothing control.")
     ap.add_argument("--gamma", type=float, default=None,
                     help="DIAGNOSTIC ONLY. set_weights derives gamma by binary search "
                          "until the top half takes exactly 80%%; forcing a value the "
@@ -581,6 +648,12 @@ def main():
               f"it so the top half takes exactly 80%; a forced value models a validator "
               f"that cannot exist. Diagnostic only.", file=sys.stderr)
 
+    picker = None
+    if args.picker:
+        _m, _f = args.picker.split(":")
+        picker = getattr(importlib.import_module(_m), _f)
+        print(f"  picker {args.picker} decides what each queried hotkey submits")
+
     if args.solve:
         solve_phase(rounds, kmax, args.solver, args.latency_s, args.cache)
 
@@ -618,7 +691,8 @@ def main():
             streams, victim_uids, our_ids, alive, events, hk_uid = replay(
                 rounds, cache, meta, N, seed, validity,
                 immunity_s=args.immunity_hours * 3600.0,
-                apply_dereg=args.apply_dereg, null=null, sample=args.sample)
+                apply_dereg=args.apply_dereg, null=null, sample=args.sample,
+                picker=picker)
             sc = ema_scores(streams)
             vec, ours = score_vector(sc, meta, victim_uids, our_ids, alive, hk_uid)
             survived = sum(1 for o in our_ids if o in alive)

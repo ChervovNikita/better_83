@@ -74,6 +74,30 @@ def assign(pool, uuid, hotkeys, ranks=None):
     return out
 
 
+def picker(pool, uuid, hotkeys):
+    """fleet_sim --picker entry point: one answer per queried hotkey, in order.
+
+    The SOLVER owns this decision, not the harness. Returning an empty list for a
+    hotkey means it deliberately answers nothing, which the validator scores as 0 --
+    that remains available, it is simply never the better choice here: a repeat still
+    earns the full optimality term while silence earns nothing.
+    """
+    a = assign(pool, uuid, list(hotkeys))
+    return [a[hk] for hk in hotkeys]
+
+
+def picker_silent(pool, uuid, hotkeys):
+    """Control: distinct while the pool lasts, then genuinely silent.
+
+    This is what fleet_sim used to hardcode. Kept as a picker so the two strategies
+    can be compared through the same interface instead of by patching the harness.
+    """
+    out = []
+    for i, hk in enumerate(hotkeys):
+        out.append(list(pool[i]) if i < len(pool) else [])
+    return out
+
+
 def duplicates(assignment):
     """How many hotkeys share a clique with a sibling -- the cost of a short pool."""
     seen = {}

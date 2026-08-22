@@ -69,6 +69,12 @@ def main():
     ap.add_argument("--sizes", type=int, nargs="+", default=[1, 5, 10, 20, 40])
     ap.add_argument("--solver", default="fleet_solver:solve_many",
                     help="module:func with signature (A, time_limit, k)")
+    ap.add_argument("--picker", default="fleet_pick:picker",
+                    help="module:func deciding what each QUERIED hotkey submits. "
+                         "The solver owns this, not the harness: it may repeat a "
+                         "clique rather than leave a hotkey silent, and it may "
+                         "return nothing, which scores 0. fleet_pick:picker_silent "
+                         "is the distinct-or-nothing control.")
     ap.add_argument("--latency-s", type=float, default=2.0,
                     help="constant reserved for the request/response round trip")
     ap.add_argument("--stage", choices=STAGES,
@@ -253,6 +259,7 @@ def main():
     if "simulate" in want:
         if sh([sys.executable, "fleet_sim.py",
                "--rounds", str(rounds), "--sizes", *[str(x) for x in args.sizes],
+               "--picker", args.picker,
                "--dataset", dataset, "--metagraph", meta, "--cache", cache]):
             return 1
 
