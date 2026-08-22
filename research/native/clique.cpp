@@ -433,14 +433,29 @@ int sn83_solve(const uint8_t *adj, int n, double time_limit, uint64_t seed,
     if (restart_steps > 0) p.restart_steps = restart_steps;
 
     if (n_threads < 1) n_threads = 1;
-    // Defaults are the measured optimum of the dose-response sweep on recent_val(250):
-    //   0%  (control)  reward 2.4294  diversity 0.5780  parity 99.60%
-    //   10%            reward 2.4341  diversity 0.5826  parity 99.60%
-    //   25%            reward 2.4458  diversity 0.5952  parity 99.20%   <- peak
-    //   40%            reward 2.4413  diversity 0.5906  parity 99.20%
-    // 25% is the only arm significant against its own control (11 better / 2 worse,
-    // sign test p = 0.0225). SN83_WALK=0 restores the previous solver exactly.
-    int walk = 100000;
+    // WALK DISABLED BY DEFAULT. The plateau walk was shipped on a sweep that looked
+    // like a dose-response peak at 25% (reward 2.4458 vs a 2.4294 control, "11 better
+    // / 2 worse, sign test p = 0.0225"). Two problems with that evidence:
+    //
+    //   * it rested on THIRTEEN changed answers. The walk only alters ~6-9% of
+    //     answers, so the sample stays tiny however many tasks are benchmarked, and
+    //     an 11-2 split on 13 outcomes is a coin flip that landed well;
+    //   * the rewards were computed before two diversity-scoring bugs were fixed,
+    //     so the levels were inflated too.
+    //
+    // Re-measured at matched config with the corrected scorer, three replications:
+    //
+    //   3 threads, recent_val[0:250]    off 2.4121  25% 2.4123   7 better / 8 worse
+    //   3 threads, recent_val[250:500]  off 2.4565  25% 2.4587   8 better / 7 worse
+    //   7 threads, recent_val[0:250]    off 2.4284  25% 2.4270   8 better / 15 worse
+    //
+    // Pooled: 23 better / 30 worse over 53 changed answers -- no gain, if anything a
+    // small loss. And the walk costs a REPRODUCIBLE parity task: uuid eb820983
+    // (n=891, tl=10) drops 38 -> 37 with the walk on, at both 3 and 7 threads.
+    //
+    // So the walk is off. SN83_WALK=100000 SN83_WALKPCT=25 restores the old behaviour
+    // for anyone who wants to re-test it.
+    int walk = 0;
     if (const char *e = getenv("SN83_WALK")) walk = atoi(e);
     int walkpct = 25;
     if (const char *e = getenv("SN83_WALKPCT")) walkpct = atoi(e);
