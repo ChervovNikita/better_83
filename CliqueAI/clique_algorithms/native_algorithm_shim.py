@@ -343,13 +343,25 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                         agree, claimants = pcoord.distinct_claimed(uuid)
                         spares = sorted((c for c in mine if len(c) < mmax),
                                         key=len, reverse=True)
-                        thresh = int(os.environ.get("SN83_AGREE_MAX", "2"))
+                        # RATIO, not an absolute count. The signal is sequential:
+                        # hotkeys 0 and 1 can collide early (distinct=1), a third finds
+                        # something new (distinct=2), and by claimant 4 an absolute
+                        # threshold of 2 still passes -- even though the round has more
+                        # cliques the fleet simply has not reached yet. Measured on
+                        # n=890 (nOm=3) that cost -0.0152, and the denominator alone did
+                        # not remove it.
+                        #
+                        # distinct/claimants separates the two: a converged fleet at 4
+                        # claimants shows 1 distinct (0.25), a still-exploring one shows
+                        # 2 (0.50).
+                        ratio = float(os.environ.get("SN83_AGREE_RATIO", "0.34"))
                         picked = None
                         # Require enough claimants for "few distinct" to mean
                         # convergence rather than earliness. Without the denominator the
                         # second arrival always sees 1 distinct and spreads on any round.
                         min_claim = int(os.environ.get("SN83_AGREE_MIN_CLAIMANTS", "3"))
-                        if 0 < agree <= thresh and claimants >= min_claim and spares:
+                        if (claimants >= min_claim and agree > 0
+                                and agree / float(claimants) <= ratio and spares):
                             for cand in spares:
                                 if len(cand) == mmax - 1 and \
                                         pcoord.claim_clique(uuid, hotkey, cand):
