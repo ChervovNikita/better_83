@@ -145,3 +145,48 @@ def claim(uuid, hotkey, n_slots):
             pass
         return i
     return None            # every slot taken: more siblings than the pool holds
+
+
+def claim_clique(uuid, hotkey, clique):
+    """Reserve this exact clique for this hotkey. False if a sibling already holds it.
+
+    This is the inverse of claim(): instead of handing a miner a clique out of one
+    shared harvest, it lets each miner solve INDEPENDENTLY -- which is what produces
+    basin diversity -- and only deduplicates the results.
+
+    Measured reason for preferring it: a shared pool comes from a single solve_many
+    harvest around one incumbent, so when that harvest holds few maximum cliques every
+    claim wraps onto the same one. On round n=890 assignment-only coordination scored
+    2.0769, identical to every hotkey submitting the same clique, while per-hotkey
+    seeding scored 2.1115. Eight independent seeded solves land in eight different
+    basins; one harvest does not.
+
+    Idempotent per hotkey, like claim(): a retry re-confirms the same clique.
+    """
+    key = ",".join(str(int(v)) for v in sorted(clique))
+    if not key:
+        return False
+    d = _task_dir(uuid)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return True                      # cannot coordinate: do not block the answer
+    import hashlib
+    h = hashlib.sha1(key.encode()).hexdigest()[:24]
+    slot = os.path.join(d, "cq." + h)
+    me = str(hotkey).encode()[:200]
+    try:
+        fd = os.open(slot, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            return True                  # unknown failure: answer anyway
+        try:
+            with open(slot, "rb") as f:
+                return f.read().strip() == me     # ours already: idempotent
+        except OSError:
+            return True
+    try:
+        os.write(fd, me)
+    finally:
+        os.close(fd)
+    return True
