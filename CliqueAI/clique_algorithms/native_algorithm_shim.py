@@ -160,7 +160,22 @@ def _spread_pick(pool, hotkey, uuid, difficulty, fleet_size):
     x_m = math.sqrt(1.0 + 1.5)
     p = 1.0 - math.exp(-max(0.0, x_m - float(difficulty) - 0.5))
     q = max(1, int(round(fleet_size * p)))
-    if len(top) >= q or not spare:
+    # Trigger on an ABSOLUTE floor, not on len(top) < q.
+    #
+    # The relative rule fired on 82% of rounds because one miner's harvest is a poor
+    # proxy for fleet coverage. Sweeping an oracle threshold over the field's true
+    # distinct-omega count on 11 measured rounds: spreading when nOm <= 3 is worth
+    # +0.1309 over plain seeding, while spreading always is worth only +0.0221. The win
+    # is concentrated entirely on rounds where very few maximum cliques exist, which is
+    # also where the field itself spreads -- 94.5% of its answers sit at omega-1 when
+    # one maximum clique exists, against 0.9% when sixteen or more do.
+    #
+    # An absolute floor also survives the compute confound that voided the first
+    # measurement: ourTop varies with thread count (21 at 2 threads, 4 at 1 on the same
+    # round) so a threshold relative to q moves with the miner's hardware, while "did I
+    # find at most 3 distinct maximum cliques" means the same thing everywhere.
+    max_top = int(os.environ.get("SN83_SPREAD_MAX_TOP", "3"))
+    if len(top) > max_top or len(top) >= q or not spare:
         slots = top                      # pool covers the fleet: everyone takes omega
     else:
         slots = top + spare[:q - len(top)]
