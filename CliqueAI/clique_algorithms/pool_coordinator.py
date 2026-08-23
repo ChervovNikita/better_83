@@ -62,8 +62,20 @@ def _sweep():
         pass
 
 
+_pub_count = 0
+
+
 def publish(uuid, pool):
     """Store this task's pool if nobody has. Returns True if we were the publisher."""
+    global _pub_count
+    _pub_count += 1
+    # Sweep occasionally rather than every call. One task directory is ~9.7 kB across 27
+    # files, and this subnet runs ~2500 rounds a day, so an unswept pool directory grows
+    # about 24 MB a day -- in tmpfs, which is RAM, on a box min_compute.yml sizes at 4-8
+    # cores. Fine for a day and a problem in a month. Every 64th publish keeps the cost
+    # negligible while bounding the directory to roughly the TTL's worth of tasks.
+    if _pub_count % 64 == 1:
+        _sweep()
     d = _task_dir(uuid)
     try:
         os.makedirs(d, exist_ok=True)
