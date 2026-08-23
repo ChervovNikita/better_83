@@ -167,7 +167,15 @@ def picker_deployed(pool, uuid, hotkeys, ctx):
     """
     if not pool:
         return [[] for _ in hotkeys]
-    q = needed(ctx.get("fleet_size", len(hotkeys)), ctx.get("difficulty", 0.8))
+    # The MEAN, not needed()'s mean + 2sd. That safety margin exists to tell the
+    # SOLVER how many cliques to find, where overshooting only wastes deadline. Here
+    # it is actively harmful: a miner that sizes the round at 16 when 9 are queried
+    # spreads the fleet over 16 slots, so with a single max-size clique available the
+    # chance any queried sibling lands on it is 9/16, and the omega clique goes unused.
+    # Measured on a synthetic pool of 1 max + 18 spares: needed() put all 9 hotkeys on
+    # omega-1; the mean puts exactly one on omega.
+    q = needed(ctx.get("fleet_size", len(hotkeys)), ctx.get("difficulty", 0.8),
+               safety=0.0)
     mx = max(len(c) for c in pool)
     top = [c for c in pool if len(c) == mx]
     if len(top) >= q:
