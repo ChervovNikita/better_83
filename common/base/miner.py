@@ -213,6 +213,24 @@ class BaseMinerNeuron(BaseNeuron):
             bt.logging.warning("Received a request without a dendrite or hotkey.")
             return True, "Missing dendrite or hotkey"
 
+        # Membership BEFORE .index(): the metagraph is synced periodically, so a
+        # validator that registered since the last sync is not in our cached copy and
+        # .index() raises ValueError from inside the blacklist rather than returning a
+        # decision. Upstream calls .index() first, which makes the un-registered branch
+        # below unreachable and turns a stale metagraph into a hard failure on requests
+        # that should have been served.
+        if synapse.dendrite.hotkey not in self.metagraph.hotkeys:
+            if not self.config.blacklist.allow_non_registered:
+                bt.logging.trace(
+                    f"Blacklisting un-registered hotkey {synapse.dendrite.hotkey}"
+                )
+                return True, "Unrecognized hotkey"
+            bt.logging.trace(
+                f"Allowing un-registered hotkey {synapse.dendrite.hotkey} "
+                f"(allow_non_registered is set); metagraph may be stale"
+            )
+            return False, "Hotkey allowed (un-registered)"
+
         uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
         if (
             not self.config.blacklist.allow_non_registered
