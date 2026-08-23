@@ -4,6 +4,7 @@ import typing
 
 import bittensor as bt
 from CliqueAI.clique_algorithms import native_algorithm, networkx_algorithm
+from CliqueAI.clique_algorithms.native_algorithm_shim import solver_seed
 from CliqueAI.graph.codec import GraphCodec
 from CliqueAI.protocol import MaximumCliqueOfLambdaGraph
 from common.base.miner import BaseMinerNeuron
@@ -50,6 +51,12 @@ class Miner(BaseMinerNeuron):
             adjacency_list,
             adjacency_matrix=adjacency_matrix,
             timeout=getattr(synapse, "timeout", None),
+            # Without this every hotkey an operator runs submits the IDENTICAL clique:
+            # the solver is reproducible in practice (same clique on 5 of 5 runs with
+            # the default seed), and each hotkey is its own process with no shared
+            # state. The scorer pays diversity = 1 / holders, so a fleet of N would
+            # earn 1/N of the diversity term. Measured cost: -0.8954 per answer.
+            seed=solver_seed(self.wallet.hotkey.ss58_address, synapse.uuid),
             fallback=lambda: networkx_algorithm(synapse.number_of_nodes, adjacency_list),
         )
         # or use GNN models

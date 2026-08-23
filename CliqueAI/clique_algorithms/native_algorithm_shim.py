@@ -70,8 +70,26 @@ def _is_valid_maximal_clique(A, verts):
     return True
 
 
+def solver_seed(hotkey, uuid):
+    """A seed unique to this hotkey AND this task.
+
+    The solver is reproducible in practice: with the default seed it returned the same
+    clique on 5 of 5 runs on every round tested. An operator running N hotkeys as N
+    miner processes therefore has all N submit the IDENTICAL clique, and the scorer pays
+    diversity = 1 / holders. Measured over 40 rounds with K=8 hotkeys inserted into the
+    real round, that costs -0.8954 per answer against distinct omega cliques.
+
+    Seeding by hotkey alone would fix the collision but pin each hotkey to one basin
+    across every task; mixing in the task uuid re-randomises the assignment each round,
+    which is also what fleet_pick.pick's per-round offset does and for the same reason.
+    """
+    import hashlib
+    h = hashlib.sha1(("%s|%s" % (hotkey, uuid)).encode()).hexdigest()
+    return int(h[:16], 16) & 0x7FFFFFFFFFFFFFFF
+
+
 def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
-                     timeout=None, fallback=None):
+                     timeout=None, fallback=None, seed=0):
     """Return a maximal clique, falling back to `fallback` on any problem.
 
     `fallback` is called with no arguments and must return a vertex list; pass the
@@ -112,7 +130,7 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
             _active += 1
             share = max(1, TOTAL_THREADS // _active)
         try:
-            clique = solve_one(A, budget, threads=share)
+            clique = solve_one(A, budget, seed=seed, threads=share)
         finally:
             with _active_lock:
                 _active -= 1
