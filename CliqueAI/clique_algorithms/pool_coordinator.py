@@ -173,6 +173,16 @@ def claim_clique(uuid, hotkey, clique):
     except OSError:
         return True                      # cannot coordinate: do not block the answer
     import hashlib
+    # Record participation BEFORE the outcome is known. A hotkey whose clique is already
+    # taken still participated, and those are exactly the hotkeys that need the
+    # convergence signal -- a fleet that all lands on one clique produces one successful
+    # claim and N-1 failures, so counting only successes leaves the denominator at 1 and
+    # the signal never fires.
+    try:
+        with open(os.path.join(d, "hk." + str(hotkey).replace("/", "_")[:80]), "w") as f:
+            f.write(str(size))
+    except OSError:
+        pass
     h = hashlib.sha1(key.encode()).hexdigest()[:24]
     # The size is in the NAME so distinct_claimed can count only max-size claims.
     # Counting every claim makes the signal measure its own output: each omega-1 spread
@@ -200,7 +210,15 @@ def claim_clique(uuid, hotkey, clique):
 
 
 def distinct_claimed(uuid):
-    """How many DISTINCT cliques the operator's hotkeys have reserved for this task.
+    """(distinct max-size cliques reserved, hotkeys that have claimed) for this task.
+
+    BOTH numbers are needed. The distinct count alone is a function of arrival position:
+    the second hotkey to arrive always sees 1, however rich the round is, so a trigger on
+    it alone fires for early arrivals everywhere. Measured on round n=890 (nOm=3, our
+    seeds finding 4 distinct maximum cliques) that cost -0.0152 -- an early sibling spread
+    into a round that had cliques to spare.
+
+    Convergence means FEW DISTINCT ACROSS MANY CLAIMANTS, which needs the denominator.
 
     This is the fleet-level starvation signal, and it is the reason coordination is worth
     more than deduplication alone. A single miner's harvest barely predicts the round's
@@ -227,6 +245,8 @@ def distinct_claimed(uuid):
             counts[sz] = counts.get(sz, 0) + 1
             if sz > best:
                 best = sz
-        return counts.get(best, 0)          # distinct claims at the LARGEST size only
+        # (distinct max-size cliques, hotkeys that have claimed at all)
+        n_claimants = sum(1 for f in os.listdir(d) if f.startswith("hk."))
+        return counts.get(best, 0), n_claimants
     except OSError:
-        return 0
+        return 0, 0

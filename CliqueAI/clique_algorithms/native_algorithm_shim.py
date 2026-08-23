@@ -340,12 +340,16 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                         # miner's harvest managed only 0.53. Converging siblings means
                         # few maximum cliques exist, which is exactly when a unique
                         # omega-1 beats a duplicate omega (+0.57 at nOm=1, +0.23 at 3).
-                        agree = pcoord.distinct_claimed(uuid)
+                        agree, claimants = pcoord.distinct_claimed(uuid)
                         spares = sorted((c for c in mine if len(c) < mmax),
                                         key=len, reverse=True)
                         thresh = int(os.environ.get("SN83_AGREE_MAX", "2"))
                         picked = None
-                        if 0 < agree <= thresh and spares:
+                        # Require enough claimants for "few distinct" to mean
+                        # convergence rather than earliness. Without the denominator the
+                        # second arrival always sees 1 distinct and spreads on any round.
+                        min_claim = int(os.environ.get("SN83_AGREE_MIN_CLAIMANTS", "3"))
+                        if 0 < agree <= thresh and claimants >= min_claim and spares:
                             for cand in spares:
                                 if len(cand) == mmax - 1 and \
                                         pcoord.claim_clique(uuid, hotkey, cand):
