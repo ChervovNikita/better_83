@@ -190,3 +190,24 @@ def claim_clique(uuid, hotkey, clique):
     finally:
         os.close(fd)
     return True
+
+
+def distinct_claimed(uuid):
+    """How many DISTINCT cliques the operator's hotkeys have reserved for this task.
+
+    This is the fleet-level starvation signal, and it is the reason coordination is worth
+    more than deduplication alone. A single miner's harvest barely predicts the round's
+    omega supply -- corr(ourTop, nOm) is 0.176 at one thread and 0.233 at three, and
+    P(nOm<=8 | ourTop<=1) is only 0.53. But the number of DISTINCT cliques that
+    independently-seeded siblings converge on tracks it well: corr = +0.679, with
+    P(nOm<=8) = 1.00 when siblings agree (d<=2) against 0.06 when they scatter (d>=6),
+    over 30 matched rounds.
+
+    Siblings agreeing means they keep landing in the same basin, which is what a round
+    with few maximum cliques looks like from the inside.
+    """
+    d = _task_dir(uuid)
+    try:
+        return sum(1 for f in os.listdir(d) if f.startswith("cq."))
+    except OSError:
+        return 0

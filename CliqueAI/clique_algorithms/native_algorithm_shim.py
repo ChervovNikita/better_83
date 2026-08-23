@@ -330,7 +330,28 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                         if pcoord.claim_clique(uuid, hotkey, cand):
                             chosen = cand
                             break
-                    clique = list(chosen if chosen else ordered[0])
+                    if chosen is not None:
+                        clique = list(chosen)
+                    else:
+                        # Every max-size clique we hold is already taken by a sibling.
+                        # How many DISTINCT cliques the fleet has converged on is the one
+                        # signal that identifies a starved round: corr(d, nOm) = +0.679
+                        # and P(nOm<=8 | d<=2) = 1.00 against 0.06 at d>=6, where a lone
+                        # miner's harvest managed only 0.53. Converging siblings means
+                        # few maximum cliques exist, which is exactly when a unique
+                        # omega-1 beats a duplicate omega (+0.57 at nOm=1, +0.23 at 3).
+                        agree = pcoord.distinct_claimed(uuid)
+                        spares = sorted((c for c in mine if len(c) < mmax),
+                                        key=len, reverse=True)
+                        thresh = int(os.environ.get("SN83_AGREE_MAX", "2"))
+                        picked = None
+                        if 0 < agree <= thresh and spares:
+                            for cand in spares:
+                                if len(cand) == mmax - 1 and \
+                                        pcoord.claim_clique(uuid, hotkey, cand):
+                                    picked = cand
+                                    break
+                        clique = list(picked if picked is not None else ordered[0])
                 else:
                     clique = solve_one(A, max(0.5, deadline - time.monotonic()),
                                        seed=seed, threads=share)
