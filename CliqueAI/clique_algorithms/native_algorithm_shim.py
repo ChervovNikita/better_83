@@ -331,7 +331,25 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                 # quo, and better than spreading into a round where omega-1 is expensive.
                 mx_pool = max(len(c) for c in pool) if pool else 0
                 top_pool = [c for c in pool if len(c) == mx_pool]
-                max_top = int(os.environ.get("SN83_SPREAD_MAX_TOP", "3"))
+                # DEFAULT 0 = never spread; take the assignment benefit only.
+                #
+                # Measured over 779 rounds with our real harvested pools, P(the round is
+                # genuinely spreadable | ourTop <= T) never rises far enough to pay for
+                # being wrong. "Spreadable" means nOm <= 8, the boundary at which a
+                # unique omega-1 stops beating a duplicate omega on 500 logged rounds.
+                #
+                #   T=1   P=0.53   expected gain +0.0204
+                #   T=2   P=0.48                 -0.0411
+                #   T=3   P=0.47                 -0.0608   <- the value shipped before
+                #   T=8   P=0.40                 -0.1438
+                #
+                # Even a pool holding exactly ONE maximum clique is only 53% likely to be
+                # on a spreadable round, and the penalty for spreading wrongly averages
+                # -0.45. T=1 is the sole non-negative setting and is worth +0.02, which
+                # does not justify the risk. The coordinator's assignment benefit --
+                # distinct cliques, no birthday collisions -- is unaffected and is why it
+                # is still worth running.
+                max_top = int(os.environ.get("SN83_SPREAD_MAX_TOP", "0"))
                 slots = pool if len(top_pool) <= max_top else top_pool
                 idx = pcoord.claim(uuid, hotkey, max(len(slots), FLEET_SIZE)) \
                     if slots else None
