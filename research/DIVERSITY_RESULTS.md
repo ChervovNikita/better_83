@@ -1,7 +1,7 @@
 # SN83 maximum-clique mining — results
 
 **Status 2026-08-23.** Champion unchanged: `v7_fastscan`, promoted to
-`native/clique.cpp`. Fifteen mechanisms were tested against the DIVERSITY objective this
+`native/clique.cpp`. Sixteen mechanisms were tested against the DIVERSITY objective this
 generation; **none beat the baseline**, and the reason is specific rather than
 exhaustion (section 8). One change shipped, one deployment blocker closed, one
 operational recommendation.
@@ -67,8 +67,9 @@ Per-hotkey median against the field median on identical rounds, `fleet_pick:pick
 | 40 | 2.2442 | 2.4276 | -0.1833 |
 
 Best fleet size is N=10-20 and the curve is flat between them; N=1 and N=40 are both
-worse. **The gap to the field median is -0.169.** That is the number this run set out to
-close, and it is unchanged by thirteen mechanisms.
+worse. **The gap to the field median is -0.169**, bootstrap 95% CI **[-0.197, -0.145]** over
+hotkeys — real, and unchanged by fifteen mechanisms. Note the CI width (0.052) is four
+times the entire fleet-size effect, which is why no fleet size is measurably best.
 
 ## 3. The gap, decomposed
 
@@ -247,12 +248,17 @@ knowing which to send is, and that information does not exist on our side.
 ### Ship as-is
 The champion is deployable now. It is robust to a 2s network round trip (parity
 99.800% -> 99.600%, McNemar p=1.00, 0 invalid, 0 over budget), and the picker fix
-(`ba8eacb`) is worth **+0.39 reward at N=40** — it is what turned the fleet from
+(`ba8eacb`) is worth **+0.385 reward at N=40** (bootstrap 95% CI [+0.296, +0.456];
++0.102 [+0.049, +0.157] at N=10) — it is what turned the fleet from
 degrading with size into flat.
 
-**Run N=10-20 hotkeys, not 40.** Measured gap to the field median: -0.1697 at N=10,
--0.1685 at N=20, **-0.1833 at N=40**. Beyond ~20 the extra hotkeys are queried on rounds
-where our pool must duplicate, and duplication splits the diversity term.
+**Fleet size barely matters between 5 and 30; avoid very large fleets.** Filling in the
+curve (N = 5, 8, 10, 12, 15, 20, 25, 30, 40) gives gaps of -0.179, -0.180, -0.170,
+-0.181, -0.170, -0.174, -0.177, -0.179, -0.183. Adjacent points zigzag by 0.011, so the
+apparent "N=10-20 optimum" in an earlier draft was sampling noise read as a peak. The
+only defensible advice is that N=40 is measurably worse than the flat region, by about
+0.013 — beyond ~30 the extra hotkeys are queried on rounds where our pool must duplicate,
+and duplication splits the diversity term.
 
 ### Do not spend more on solver diversity without new information
 Fourteen mechanisms were tested against the diversity objective this generation and none
