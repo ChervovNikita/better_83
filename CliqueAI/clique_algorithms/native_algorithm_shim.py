@@ -320,8 +320,29 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                 # So each miner harvests with its OWN seed, keeps its own best, and only
                 # moves if a sibling already reserved that exact clique. Diversity comes
                 # from the seeds; the coordinator removes only the exact collisions.
-                mine = [tuple(sorted(int(v) for v in c))
-                        for c in solve_many(A, budget, max(4, FLEET_SIZE // 4), seed=seed)]
+                # LAZY HARVEST. The harvest costs 25% of the deadline and is paid on
+                # EVERY round, while a collision -- the only thing alternatives are for
+                # -- happens on about 70%. Shrinking it was tested and lost (item 22:
+                # distinct unchanged at 6.50 vs 6.56 but d_GAP -0.0404), because fewer
+                # alternatives means a displaced miner takes whatever is left rather than
+                # the best of several.
+                #
+                # So defer it. Solve at nearly the full budget, claim that clique, and
+                # harvest only if a sibling already holds it. Rounds with no collision
+                # pay nothing at all; rounds with one pay for a harvest that is used.
+                clique = None
+                if int(os.environ.get("SN83_LAZY_HARVEST", "1")):
+                    _res = float(os.environ.get("SN83_HARVEST_RESERVE", "0.20"))
+                    _t = max(0.5, (deadline - time.monotonic()) * (1.0 - _res))
+                    _first = tuple(sorted(int(v) for v in
+                                          solve_one(A, _t, seed=seed, threads=share)))
+                    if _first and pcoord.claim_clique(uuid, hotkey, _first):
+                        clique = list(_first)
+                mine = [] if clique is not None else [
+                    tuple(sorted(int(v) for v in c))
+                    for c in solve_many(A, max(0.5, deadline - time.monotonic()),
+                                        int(os.environ.get("SN83_HARVEST_N", "10")),
+                                        seed=seed)]
                 if mine:
                     mmax = max(len(c) for c in mine)
                     ordered = [c for c in mine if len(c) == mmax]
@@ -368,7 +389,7 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                                     picked = cand
                                     break
                         clique = list(picked if picked is not None else ordered[0])
-                else:
+                elif clique is None:
                     clique = solve_one(A, max(0.5, deadline - time.monotonic()),
                                        seed=seed, threads=share)
             elif SPREAD and hotkey is not None and uuid is not None:
