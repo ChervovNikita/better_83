@@ -104,3 +104,31 @@ def duplicates(assignment):
     for hk, c in assignment.items():
         seen.setdefault(tuple(c), []).append(hk)
     return sum(len(v) - 1 for v in seen.values() if len(v) > 1)
+
+
+def picker_backfill(pool, uuid, hotkeys):
+    """Distinct max-size cliques first; dip into sub-omega ones only when short.
+
+    The pool may now contain maximal cliques below omega (see fleet_solver's
+    SN83_BACKFILL). Handing those out indiscriminately would be a loss: the
+    optimality term is multiplied by (1 + difficulty), so dropping a vertex costs
+    up to 2x what the diversity term can pay back. They are worth submitting in
+    exactly one situation -- when the alternative is repeating a sibling's clique,
+    which earns full optimality but splits the diversity term two ways.
+
+    So: rotate within the max-size prefix while it is long enough to give every
+    queried hotkey a distinct answer, and only extend into the smaller ones for the
+    surplus. Wrapping remains the last resort, for when even that runs out.
+    """
+    q = len(hotkeys)
+    if not pool or q == 0:
+        return [[] for _ in hotkeys]
+    mx = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == mx]
+    if len(top) >= q:
+        use = top
+    else:
+        spare = sorted((c for c in pool if len(c) < mx), key=len, reverse=True)
+        use = top + spare[:q - len(top)]
+    a = assign(use, uuid, list(hotkeys))
+    return [a[hk] for hk in hotkeys]
