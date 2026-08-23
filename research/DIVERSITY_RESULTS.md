@@ -197,6 +197,21 @@ I mis-attributed this null twice before getting here: first as "larger hulls are
 does not work". Both were wrong, and both were recorded as general conclusions when
 they were scoped to one budget.
 
+## 4b. The portfolio lever, tested both ways and closed
+
+The user's original instruction — "take cliques from all of them" — was the one thing
+never tested, since every mechanism had been measured alone against a control.
+
+| | pool vs champion | reward delta |
+|---|---|---|
+| union at 4x compute (3 families x 7 threads) | 1.65x | **-0.0001** |
+| union at EQUAL compute (3 families x 2 threads vs champion at 7) | 1.06x | **+0.0015, p=0.65** |
+
+At equal compute the novel share is **identical to one decimal** — 33.0% against 32.9%.
+Three different search dynamics, the same fraction of uncontested cliques. The portfolio
+fails twice: it does not help when compute is free, and buying it with real compute costs
+what it returns.
+
 ## 5. Cross-check: two independent routes to the same gap
 
 Measured directly from logged field answers, without the simulator: our optimality is
