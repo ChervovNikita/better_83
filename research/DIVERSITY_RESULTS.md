@@ -220,6 +220,22 @@ Measured directly from logged field answers, without the simulator: our optimali
 uniqueness. The field is also one tight cluster — 256 of 270 hotkeys within **0.051** of
 each other — so our -0.169 is **2.8x its entire p10-p90 spread**. We sit at p2.
 
+## 5-final. The decomposition (measured with an oracle, fleet basis, 259 rounds)
+
+| component | value | share |
+|---|---|---|
+| **selection** — better choice from the pool we already hold | **+0.0726** | 51% |
+| **reach** — any optimum, including unclaimed ones | **+0.0016** | 1% |
+| **irreducible** — marginal-entrant penalty | **-0.0694** | 48% |
+
+Even with perfect selection AND perfect reach we land 0.069 below the field median. On a
+saturated round every optimum is already held, so the best available move is to halve an
+incumbent's diversity by sharing their clique while they keep 1/1. No algorithm
+addresses that.
+
+**The lever this generation pursued (reach) had 1% of the available headroom.** The
+starting premise — "reach, not selection, is the constraint" — was backwards.
+
 ## 5b. The diagnosis in its final form
 
 Restricted to max-size answers, where we and the field play the same game: the field is
