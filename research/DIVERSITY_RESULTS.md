@@ -114,10 +114,12 @@ and not a mechanism), 80 rounds, 20% timeouts:
 | the field | 18.5 |
 | **reached by NOBODY** | **24.6** |
 
-More maxima go unclaimed than we and the whole field find combined. Against a decision
-rule fixed in writing beforehand (E~31-35 = supply exhausted, stop; E>>40 = continue),
-E=46.5 selects continue. **The remaining gap is not a supply ceiling — it is a reach
-failure, and the targets are demonstrably there.**
+**WITHDRAWN.** The 24.6 figure is a MEAN over a distribution whose MEDIAN is 0: optima
+per round run mean 62.2 against median 18, max 586, so a handful of enormous rounds carry
+the average. **On the median round the field submits every optimum that exists** and the
+unclaimed set is empty. The decision rule fired on an artifact, and the reach line it
+kept open was later closed directly — perfect, field-informed reach measures **+0.0016**
+and is significantly NEGATIVE in the high-K regime.
 
 ## 4. Refuted mechanisms (this generation)
 
@@ -265,9 +267,13 @@ full set.) We are not solving worse (optimality 1.0000 vs 0.9555), not in the wr
 class (max-size earns 2.5177 vs 2.4276 one below, so the third of the field going below
 max is losing reward), and not short of cliques (133.9 available, 8 submitted).
 
-The field reaches 46.8% by being **51 independent searches spread over ~18.5 max-size
-optima**. We are one search, and one search concentrates. That is a property of being a
-single actor in a crowd, not a deficiency of the solver.
+**WITHDRAWN — twice over.** The 46.8% figure does not reproduce on the full 279-round set
+(41.2% vs our 33.6%). And the "51 independent searches" explanation rests on modelling K
+from the OBSERVED distinct-clique count, which is biased by collisions — circular. A
+pairwise detector found **0 coordinated pairs among 252 hotkeys**, but the aggregate
+independence check is invalid, so **whether the field coordinates is UNRESOLVED**. No
+supported mechanism currently explains the gap; see FINDINGS.md for three that were
+tried and withdrawn.
 
 ## 5c. WITHDRAWN — the mechanism below is a pooling artifact
 
