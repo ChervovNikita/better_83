@@ -251,7 +251,18 @@ The field reaches 46.8% by being **51 independent searches spread over ~18.5 max
 optima**. We are one search, and one search concentrates. That is a property of being a
 single actor in a crowd, not a deficiency of the solver.
 
-## 5c. The mechanism, measured directly
+## 5c. WITHDRAWN — the mechanism below is a pooling artifact
+
+**The section that followed claimed our pool is biased toward popular optima (ratio
+1.21-1.74). That ratio is computed by pooling cliques across rounds of unequal size.
+Within round the effect is -0.006 (median -0.044) and only 31% of rounds show the
+claimed direction. It is withdrawn.**
+
+The reward measurements are unaffected — all are paired within round. What is withdrawn
+is the EXPLANATION for them, not the results. No supported mechanism currently replaces
+it.
+
+## 5c-old (withdrawn). The mechanism, measured directly
 
 For each field optimum, its holder count split by whether our pool contains it:
 
