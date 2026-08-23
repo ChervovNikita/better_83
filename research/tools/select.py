@@ -124,9 +124,25 @@ def main():
 
     print("hull=%d frac=%.2f K=%d   %d rounds usable of %d, %d timeouts\n"
           % (args.hull, args.frac, args.k, used, len(rounds), timeouts))
-    print("  maxima enumerated per round        %.1f" % np.mean(tot_cl))
-    print("  of those unclaimed by the field    %.1f  (%.0f%%)"
-          % (np.mean(tot_unc), 100 * np.mean(tot_unc) / np.mean(tot_cl)))
+    tc = np.array(tot_cl, dtype=float)
+    tu = np.array(tot_unc, dtype=float)
+    ratio_of_means = 100 * tu.mean() / tc.mean()
+    per_round = 100 * np.mean(tu / tc)
+    print("  maxima enumerated per round        %.1f" % tc.mean())
+    print("  unclaimed, RATIO OF MEANS          %.1f  (%.0f%%)  <- pooled, do not use"
+          % (tu.mean(), ratio_of_means))
+    print("  unclaimed, MEAN OF PER-ROUND       (%.0f%%)  median %.0f%%"
+          % (per_round, 100 * np.median(tu / tc)))
+    print()
+    print("  The two differ by %.0f points because rounds with many enumerated maxima"
+          % (ratio_of_means - per_round))
+    print("  also have a higher unclaimed fraction, and the pooled ratio weights them")
+    print("  by their clique count. A K-of-n draw happens PER ROUND, so the per-round")
+    print("  figure is the one that predicts what selection can deliver. Reasoning from")
+    print("  the pooled %.0f%% predicts uniform selection lands ~%.1f unclaimed in K=8;"
+          % (ratio_of_means, args.k * ratio_of_means / 100))
+    print("  the per-round figure predicts ~%.1f, which is what the table shows."
+          % (args.k * per_round / 100))
     print()
     print("%-9s %14s %12s %14s" % ("rule", "UNCL in K", "novel%", "vs head"))
     base = np.mean(unc["head"])
