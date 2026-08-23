@@ -176,9 +176,19 @@ def _spread_pick(pool, hotkey, uuid, difficulty, fleet_size):
     # find at most 3 distinct maximum cliques" means the same thing everywhere.
     max_top = int(os.environ.get("SN83_SPREAD_MAX_TOP", "3"))
     if len(top) > max_top or len(top) >= q or not spare:
-        slots = top                      # pool covers the fleet: everyone takes omega
+        # Return None, NOT a hash-picked omega clique. Returning one would change two
+        # things at once: which omega clique this hotkey submits AND whether it drops to
+        # omega-1. Measured on round n=891, where no hotkey's pool was short enough to
+        # trigger a spread, the arm still scored 2.9375 against 3.0000 -- entirely from
+        # picking a different omega clique out of the pool. That made every "spread"
+        # comparison a comparison of two changes.
+        #
+        # With None the caller falls through to solve_one, so spread is a pure add-on to
+        # per-hotkey seeding and the contrast isolates the omega-1 decision.
+        return None
     else:
         slots = top + spare[:q - len(top)]
+    slots = top + spare[:q - len(top)]
     h = int(hashlib.sha1(("%s|%s" % (hotkey, uuid)).encode()).hexdigest()[:16], 16)
     return slots[h % len(slots)]
 
