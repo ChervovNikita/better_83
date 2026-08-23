@@ -19,6 +19,7 @@ deadline. `needed()` sizes the request from the difficulty the task itself carri
 """
 import hashlib
 import math
+import os
 
 REFERENCE_R = 1.5          # MinerSelector.reference_r
 
@@ -126,11 +127,28 @@ def picker_backfill(pool, uuid, hotkeys):
     mx = max(len(c) for c in pool)
     top = [c for c in pool if len(c) == mx]
     if len(top) >= q:
-        use = top
-    else:
-        spare = sorted((c for c in pool if len(c) < mx), key=len, reverse=True)
-        use = top + spare[:q - len(top)]
-    a = assign(use, uuid, list(hotkeys))
+        return [assign(top, uuid, list(hotkeys))[hk] for hk in hotkeys]
+    # How many of the surplus hotkeys get a spare rather than repeating a sibling.
+    # This is NOT obviously "all of them". Measured on a cache whose max-size pool
+    # runs 3-4 against ~9 queried, filling the whole shortfall converts ~6 of 9
+    # submissions to omega-1, and tools/mix.py shows deep conversion loses
+    # monotonically. The counterfactual that motivated backfill was measured where the
+    # shortfall was 1-2. SN83_BF_CAP=0 reproduces picker_maxonly exactly; unset means
+    # no cap, the original behaviour.
+    cap = os.environ.get("SN83_BF_CAP")
+    need = q - len(top)
+    if cap is not None:
+        need = min(need, int(cap))
+    spare = sorted((c for c in pool if len(c) < mx), key=len, reverse=True)
+    need = min(need, len(spare))
+    # Build exactly q slots. Any hotkey left over after the omega cliques and the
+    # capped spares repeats an OMEGA clique, never a spare: a duplicated omega-1 is
+    # strictly worse than a duplicated omega -- it splits the same diversity term and
+    # gives up a vertex of optimality on top.
+    use = top + spare[:need]
+    while len(use) < q:
+        use.append(top[(len(use) - len(top) - need) % len(top)])
+    a = assign(use[:q], uuid, list(hotkeys))
     return [a[hk] for hk in hotkeys]
 
 
