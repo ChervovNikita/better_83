@@ -224,9 +224,12 @@ each other — so our -0.169 is **2.8x its entire p10-p90 spread**. We sit at p2
 
 | component | value | share |
 |---|---|---|
-| **selection** — better choice from the pool we already hold | **+0.0726** | 51% |
+| **selection** — better choice from the pool we already hold | **+0.0725** [95% CI +0.0595, +0.0864] | 51% |
 | **reach** — any optimum, including unclaimed ones | **+0.0016** | 1% |
-| **irreducible** — marginal-entrant penalty | **-0.0694** | 48% |
+| **irreducible** — marginal-entrant penalty | **-0.0693** [95% CI -0.0926, -0.0463] | 48% |
+
+Both bootstrapped components exclude zero. Even at the optimistic end of its interval,
+a third of the gap remains structural.
 
 Even with perfect selection AND perfect reach we land 0.069 below the field median. On a
 saturated round every optimum is already held, so the best available move is to halve an
