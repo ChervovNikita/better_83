@@ -317,9 +317,26 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                             for c in solve_many(A, budget, max(2, FLEET_SIZE), seed=seed)]
                     pcoord.publish(uuid, pool)
                     pool = pcoord.fetch(uuid, wait_s=0.05) or pool
-                idx = pcoord.claim(uuid, hotkey, len(pool)) if pool else None
-                if idx is not None and 0 <= idx < len(pool):
-                    clique = list(pool[idx])
+                # Which slots are claimable decides whether we spread. The pool is
+                # sorted max-size first, so claiming straight into it spreads whenever
+                # OUR pool is short -- 82% of rounds -- when spreading only pays when the
+                # FIELD is short, 7-23% of rounds. Measured, that costs -0.28 on rounds
+                # where the field held 23 distinct maximum cliques and our harvest held a
+                # few.
+                #
+                # So: offer the spares only when the max-size count is low in ABSOLUTE
+                # terms, which is the one signal that does track a genuinely starved
+                # round. Above that threshold the claimable set is the max-size cliques
+                # alone and the overflow wraps onto them, which duplicates -- the status
+                # quo, and better than spreading into a round where omega-1 is expensive.
+                mx_pool = max(len(c) for c in pool) if pool else 0
+                top_pool = [c for c in pool if len(c) == mx_pool]
+                max_top = int(os.environ.get("SN83_SPREAD_MAX_TOP", "3"))
+                slots = pool if len(top_pool) <= max_top else top_pool
+                idx = pcoord.claim(uuid, hotkey, max(len(slots), FLEET_SIZE)) \
+                    if slots else None
+                if idx is not None and slots:
+                    clique = list(slots[idx % len(slots)])
                 else:
                     clique = solve_one(A, max(0.5, deadline - time.monotonic()),
                                        seed=seed, threads=share)
