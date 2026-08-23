@@ -2,7 +2,7 @@ import time
 import typing
 
 import bittensor as bt
-from CliqueAI.clique_algorithms import networkx_algorithm
+from CliqueAI.clique_algorithms import native_algorithm, networkx_algorithm
 from CliqueAI.graph.codec import GraphCodec
 from CliqueAI.protocol import MaximumCliqueOfLambdaGraph
 from common.base.miner import BaseMinerNeuron
@@ -31,7 +31,19 @@ class Miner(BaseMinerNeuron):
         codec = GraphCodec()
         adjacency_matrix = codec.decode_matrix(synapse.encoded_matrix)
         adjacency_list = codec.matrix_to_list(adjacency_matrix)
-        maximum_clique: list[int] = networkx_algorithm(synapse.number_of_nodes, adjacency_list)
+        # The researched champion, with upstream's approximation as the fallback.
+        # nx.approximation.max_clique is a greedy heuristic and does not reach omega;
+        # every result in research/ was measured against the native solver, which
+        # nothing in this file used until now. native_algorithm validates its own
+        # answer for validity AND maximality before returning it, and falls back on
+        # any failure, so the miner always answers.
+        maximum_clique: list[int] = native_algorithm(
+            synapse.number_of_nodes,
+            adjacency_list,
+            adjacency_matrix=adjacency_matrix,
+            timeout=getattr(synapse, "timeout", None),
+            fallback=lambda: networkx_algorithm(synapse.number_of_nodes, adjacency_list),
+        )
         # or use GNN models
         # from CliqueAI.clique_algorithms import scattering_clique_algorithm
         # maximum_clique = scattering_clique_algorithm(synapse.number_of_nodes, adjacency_list)

@@ -1,2 +1,3 @@
 from .gnn_algorithm import scattering_clique_algorithm
+from .native_algorithm_shim import native_algorithm
 from .networkx_algorithm import networkx_algorithm
