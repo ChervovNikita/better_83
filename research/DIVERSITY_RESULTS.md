@@ -179,10 +179,12 @@ against our current submitted-prefix novel share of 30.2%. At the measured +0.53
 conversion that is **+0.099, about 58% of the -0.170 gap**, from a pool built with no
 field data.
 
-**WITHDRAWN pending Block L** — the 108.5 figure is measured on the 11 rounds that had
-unclaimed cliques (selected on an outcome correlated with clique count), while 30.4 is
-the mean over 120 unselected rounds. The comparison is confounded and the +0.099
-estimate built on it is withdrawn. What survives: MoMC is complete (returns 100% of the
+**WITHDRAWN AND SUBSEQUENTLY DISPROVED.** The 108.5 figure was measured on the 11 rounds
+that had unclaimed cliques (selected on an outcome correlated with clique count), while
+30.4 is the mean over 120 unselected rounds — a confounded comparison, so the +0.099
+estimate built on it was withdrawn. The same-round test then killed it outright: raising
+the enumeration budget from 4.78s to 10.75s moved the yield by 1.2 maxima, and MoMC used
+only **1.65s of the 10.75s allowance**. It was never truncated; it finishes. What survives: MoMC is complete (returns 100% of the
 unclaimed cliques its hull contains) and our hull contains 62.8% of them.
 
 The original claim was: **the obstacle is cost, not reachability** — the first time this generation that has
