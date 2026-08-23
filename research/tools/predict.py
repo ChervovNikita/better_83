@@ -86,10 +86,11 @@ def main():
             if len(rounds) >= args.rounds:
                 break
 
-    FEATS = ["degsum", "degmin", "ext", "lsccHits"]
+    FEATS = ["degsum", "degmin", "ext", "lsccHits", "overlap", "cndens"]
     per_round = {f: [] for f in FEATS}
     prefix = {f: [] for f in FEATS}
     base_prefix, used, tot_cl, tot_unc = [], 0, [], []
+    dropped = collections.Counter()
     tmp = os.path.join(os.environ.get("CLAUDE_JOB_DIR", "/tmp"), "tmp")
     os.makedirs(tmp, exist_ok=True)
 
@@ -107,6 +108,7 @@ def main():
         write_dimacs(M, H, path)
         got, to = run_momc(path, 5000, max(0.5, rec["time_limit"] * args.frac))
         if to or not got:
+            dropped["timeout"] += 1
             continue
         seen, cl = set(), []
         for c in got:
@@ -115,9 +117,11 @@ def main():
                 seen.add(vs)
                 cl.append(vs)
         if len(cl) < 4:
+            dropped["few_cliques"] += 1
             continue
         labels = [1 if c not in field else 0 for c in cl]
         if not any(labels) or all(labels):
+            dropped["all_one_label"] += 1
             continue
         used += 1
         tot_cl.append(len(cl))
@@ -135,6 +139,28 @@ def main():
         feats["ext"] = ext
         feats["lsccHits"] = [-float(hits.get(c, 0)) for c in cl]
 
+        # overlap: how much this clique shares with the OTHER enumerated maxima. A
+        # clique sitting in a dense cluster of overlapping optima is one many searches
+        # funnel into; a peripheral one shares little. Computable from the enumerated
+        # pool alone -- no field data.
+        sets = [set(c) for c in cl]
+        ov = []
+        for i, si in enumerate(sets):
+            tot = sum(len(si & sj) for j, sj in enumerate(sets) if j != i)
+            ov.append(-float(tot) / max(len(sets) - 1, 1))
+        feats["overlap"] = ov
+
+        # cndens: common-neighbour mass among the members. FINDINGS records a measured
+        # reach signal in this direction -- the maxima we MISS sit in sparser pockets,
+        # lower common-neighbour density, paired within round at p=0.012. If that
+        # holds for the FIELD's misses too it should separate unclaimed from contested.
+        Mi = M.astype(np.int64)
+        cnd = []
+        for c in cl:
+            rows = Mi[list(c)]
+            cnd.append(-float(rows.sum(axis=0).sum()) / len(c))
+        feats["cndens"] = cnd
+
         base_prefix.append(sum(labels[:args.k]))
         for f in FEATS:
             a = auc(feats[f], labels)
@@ -143,8 +169,14 @@ def main():
             order = sorted(range(len(cl)), key=lambda i: -feats[f][i])
             prefix[f].append(sum(labels[i] for i in order[:args.k]))
 
-    print("hull=%d frac=%.2f K=%d   %d rounds usable\n" % (args.hull, args.frac,
-                                                           args.k, used))
+    print("hull=%d frac=%.2f K=%d   %d rounds usable of %d\n"
+          % (args.hull, args.frac, args.k, used, len(rounds)))
+    if dropped:
+        print("  DROPPED: %s" % ", ".join("%s %d" % kv for kv in sorted(dropped.items())))
+        print("  Dropping rounds with few cliques or a single label SELECTS clique-rich")
+        print("  rounds, so the counts below are NOT comparable to tools/order.py's over")
+        print("  all rounds. The AUC is computed within round and averaged, so it is.")
+        print()
     print("  maxima enumerated per round   %.1f" % np.mean(tot_cl))
     print("  of those unclaimed            %.1f  (%.0f%%)"
           % (np.mean(tot_unc), 100 * np.mean(tot_unc) / np.mean(tot_cl)))
