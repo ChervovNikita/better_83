@@ -58,8 +58,16 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("submissions")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--margins", type=int, nargs="+", default=[1],
+                    help="backfill counterfactual at omega-m for each m. The question "
+                         "is not 'is omega-m good' -- it is 'is omega-m better than "
+                         "REPEATING a sibling's omega clique', which is the only "
+                         "alternative a short pool leaves. Sweeping m says how deep "
+                         "the harvest may go once the omega-1 spares run out.")
     args = ap.parse_args()
 
+    global MARGINS
+    MARGINS = args.margins
     rounds = load(args.submissions)
     per = []          # per-round dicts
     ours_hold = []    # per-submission holder decomposition
@@ -115,23 +123,28 @@ def main():
         # never used. It is not a bound, it is a proposal, and it can LOSE: dropping to
         # omega-1 cuts the optimality term, which is multiplied by (1+difficulty),
         # while it only buys back a diversity term capped at 1.
-        sizes_bf, keys_bf = list(sizes), list(keys)
-        seen2 = collections.Counter()
+        bfm = {}
         n_bf = 0
-        for i in our_i:
-            kk = keys[i]
-            seen2[kk] += 1
-            if seen2[kk] > 1:
-                sizes_bf[i] = sizes[i] - 1
-                keys_bf[i] = ("bf", i)
-                n_bf += 1
-        bf = score_round(sizes_bf, valid, keys_bf, d)
+        for m in MARGINS:
+            sizes_bf, keys_bf = list(sizes), list(keys)
+            seen2 = collections.Counter()
+            n_bf = 0
+            for i in our_i:
+                kk = keys[i]
+                seen2[kk] += 1
+                if seen2[kk] > 1:
+                    sizes_bf[i] = max(1, sizes[i] - m)
+                    keys_bf[i] = ("bf", i)
+                    n_bf += 1
+            bfm[m] = score_round(sizes_bf, valid, keys_bf, d)
+        bf = bfm[MARGINS[0]]
 
         per.append(dict(
             base=float(sum(base[i] for i in our_i)),
             nself=float(sum(ns[i] for i in our_i)),
             nfield=float(sum(nf[i] for i in our_i)),
             bf=float(sum(bf[i] for i in our_i)),
+            bfm={m: float(sum(v[i] for i in our_i)) for m, v in bfm.items()},
             n_bf=n_bf,
             n=len(our_i)))
 
@@ -184,6 +197,17 @@ def main():
              100 * (dbf[aff] > 1e-9).mean() if aff.any() else 0.0, aff.sum()))
     print("    (%d of %d rounds have a repeat to replace; %.1f%% of all submissions)"
           % (aff.sum(), len(per), 100 * nbf.sum() / k.sum()))
+    if len(MARGINS) > 1:
+        print()
+        print("  how deep may the harvest go? each row replaces a REPEAT with a unique")
+        print("  clique that many vertices below omega:")
+        for m in MARGINS:
+            v = np.array([p["bfm"][m] for p in per])
+            dv = v - b
+            print("    omega-%d  %+.4f/hotkey  wins %5.1f%% of affected rounds  %s"
+                  % (m, dv.sum() / k.sum(),
+                     100 * (dv[aff] > 1e-9).mean() if aff.any() else 0.0,
+                     "better than repeating" if dv.sum() > 0 else "WORSE than repeating"))
     print()
     print("  SUPPLY is a lower bound (a new clique would usually also shed field")
     print("  holders); REACH is an upper bound (it assumes an un-taken clique always")

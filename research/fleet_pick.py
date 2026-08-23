@@ -132,3 +132,17 @@ def picker_backfill(pool, uuid, hotkeys):
         use = top + spare[:q - len(top)]
     a = assign(use, uuid, list(hotkeys))
     return [a[hk] for hk in hotkeys]
+
+
+def picker_maxonly(pool, uuid, hotkeys):
+    """Exact control for picker_backfill: the behaviour before spares existed.
+
+    solve_many now returns sub-omega cliques too, so plain `picker` would hand them
+    out through the modular wrap and would NOT be the old behaviour. Filtering to the
+    max-size prefix reproduces it exactly, which makes the two pickers a paired
+    comparison on one solve rather than two runs of a nondeterministic solver.
+    """
+    if not pool:
+        return [[] for _ in hotkeys]
+    mx = max(len(c) for c in pool)
+    return picker([c for c in pool if len(c) == mx], uuid, hotkeys)
