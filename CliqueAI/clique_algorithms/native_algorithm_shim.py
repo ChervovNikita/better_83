@@ -142,6 +142,32 @@ SPREAD = int(os.environ.get("SN83_SPREAD", "0"))
 FLEET_SIZE = int(os.environ.get("SN83_FLEET_SIZE", "1"))
 
 
+def difficulty_from_n(number_of_nodes):
+    """Recover the task difficulty from the vertex count.
+
+    The synapse does not carry difficulty, and every problem is labelled "general", so
+    the label carries nothing either. But CliqueAI/selection/problem_selector.py defines
+    exactly four problems and their vertex ranges do not overlap, so the node count
+    determines the difficulty exactly:
+
+        290-300 -> 0.7    490-500 -> 0.8    690-700 -> 0.9    890-900 -> 1.0
+
+    Verified against every logged round. Returns 0.8 for a count outside all four ranges,
+    which would mean upstream added a problem; the caller only uses this to size an
+    estimate, so a wrong default degrades the estimate rather than breaking the answer.
+    """
+    n = int(number_of_nodes)
+    if 290 <= n <= 300:
+        return 0.7
+    if 490 <= n <= 500:
+        return 0.8
+    if 690 <= n <= 700:
+        return 0.9
+    if 890 <= n <= 900:
+        return 1.0
+    return 0.8
+
+
 def _spread_pick(pool, hotkey, uuid, difficulty, fleet_size):
     """Choose omega or a distinct omega-1 from a harvested pool, using local state only.
 

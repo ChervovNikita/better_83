@@ -4,7 +4,10 @@ import typing
 
 import bittensor as bt
 from CliqueAI.clique_algorithms import native_algorithm, networkx_algorithm
-from CliqueAI.clique_algorithms.native_algorithm_shim import solver_seed
+from CliqueAI.clique_algorithms.native_algorithm_shim import (
+    difficulty_from_n,
+    solver_seed,
+)
 from CliqueAI.graph.codec import GraphCodec
 from CliqueAI.protocol import MaximumCliqueOfLambdaGraph
 from common.base.miner import BaseMinerNeuron
@@ -62,6 +65,14 @@ class Miner(BaseMinerNeuron):
             # seeding only removes the holders that were OURS and the field already
             # holds 67.5% of our pool.)
             seed=solver_seed(self.wallet.hotkey.ss58_address, synapse.uuid),
+            # Passed so the omega-1 spread rule can activate when SN83_SPREAD=1. Without
+            # these three the rule silently does nothing, because it needs a per-hotkey
+            # hash and an estimate of how many siblings are queried. difficulty is not in
+            # the synapse, but the four problems in problem_selector.py have
+            # non-overlapping vertex ranges, so number_of_nodes determines it exactly.
+            hotkey=self.wallet.hotkey.ss58_address,
+            uuid=synapse.uuid,
+            difficulty=difficulty_from_n(synapse.number_of_nodes),
             fallback=lambda: networkx_algorithm(synapse.number_of_nodes, adjacency_list),
         )
         # or use GNN models
