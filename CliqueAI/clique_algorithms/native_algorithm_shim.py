@@ -19,11 +19,25 @@ while the upstream answer at least scores something:
 """
 import os
 import sys
+import threading
+import time
 
 import numpy as np
 
 _RESEARCH = os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))), "research")
+
+# Seven validators query this subnet, so concurrent requests are not hypothetical, and
+# the solver spawns SN83_THREADS workers (default 8) against a 4-8 core miner. The first
+# design serialised solves behind a semaphore. Measured, that was worse than the problem:
+# with four simultaneous requests the two that waited ran out of budget and fell back,
+# and a fallback is worth about 76% of omega while a thread-starved native solve still
+# reaches omega. So concurrency is admitted and the THREAD BUDGET is shared instead.
+TOTAL_THREADS = int(os.environ.get("SN83_THREADS", "8"))
+_active = 0
+_active_lock = threading.Lock()
+# Below this many seconds of remaining budget the native solve is not worth starting.
+MIN_BUDGET_S = float(os.environ.get("SN83_MIN_BUDGET_S", "0.75"))
 
 # Seconds held back from the deadline for the trip home through the dendrite.
 ROUND_TRIP_S = float(os.environ.get("SN83_ROUND_TRIP_S", "2.0"))
@@ -80,14 +94,29 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
             A = np.ascontiguousarray(adjacency_matrix, dtype=np.uint8)
         np.fill_diagonal(A, 0)
 
-        budget = float(timeout) if timeout else DEFAULT_TIMEOUT_S
-        budget = max(0.5, budget - ROUND_TRIP_S)
+        deadline = time.monotonic() + (float(timeout) if timeout
+                                       else DEFAULT_TIMEOUT_S) - ROUND_TRIP_S
 
         if _RESEARCH not in sys.path:
             sys.path.insert(0, _RESEARCH)
         from fastsolver import solve as solve_one       # builds the .so if stale
 
-        clique = solve_one(A, budget)
+        budget = deadline - time.monotonic()
+        if budget < MIN_BUDGET_S:
+            return _fb()
+        # Share the cores rather than queue for them. Each in-flight solve takes an
+        # equal slice, floor 1, so N simultaneous requests never ask the box for more
+        # than TOTAL_THREADS between them.
+        global _active
+        with _active_lock:
+            _active += 1
+            share = max(1, TOTAL_THREADS // _active)
+        try:
+            clique = solve_one(A, budget, threads=share)
+        finally:
+            with _active_lock:
+                _active -= 1
+
         clique = [int(x) for x in clique]
         if _is_valid_maximal_clique(A, clique):
             return sorted(clique)

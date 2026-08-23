@@ -1,3 +1,4 @@
+import asyncio
 import time
 import typing
 
@@ -37,7 +38,14 @@ class Miner(BaseMinerNeuron):
         # nothing in this file used until now. native_algorithm validates its own
         # answer for validity AND maximality before returning it, and falls back on
         # any failure, so the miner always answers.
-        maximum_clique: list[int] = native_algorithm(
+        # asyncio.to_thread, not a direct call: this handler is `async def` and the
+        # solve blocks for up to the full deadline. Whether bittensor's axon dispatches
+        # forward_fn onto a threadpool is version-dependent, and if it does not, a
+        # blocking solve stalls the event loop for every other validator's request.
+        # ctypes releases the GIL for the duration of the foreign call, so the thread
+        # genuinely runs in parallel.
+        maximum_clique: list[int] = await asyncio.to_thread(
+            native_algorithm,
             synapse.number_of_nodes,
             adjacency_list,
             adjacency_matrix=adjacency_matrix,
