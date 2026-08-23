@@ -234,8 +234,11 @@ a third of the gap remains structural.
 **The corrected picture (see FINDINGS for two superseded versions):** what we SUBMIT is
 behind the field median on **92% of rounds**, median deficit **-0.1032**. What our POOL
 could achieve with oracle selection ties the field median on the typical round
-(median 0.0000). **So the deficit is a selection problem on nearly every round** — the
-cliques needed are already in the pool, which is why reach is worth only +0.0016.
+(median 0.0000). Paired, on the same rounds: `ours - field` median **-0.0875**; `best-from-pool - ours`
+median **+0.0125**. So perfect selection recovers about **14%** of the median deficit,
+not all of it. (An earlier draft derived a larger figure by subtracting two medians —
+invalid, medians are not additive.) Reach is worth +0.0016. Neither explains the
+remainder.
 
 **Reported as means; the medians tell a different story.** Selection headroom has median
 **+0.0125** (mean +0.0726). The irreducible residual has median **+0.0000** (mean
