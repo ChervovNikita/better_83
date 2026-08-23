@@ -33,7 +33,44 @@ _RESEARCH = os.path.join(os.path.dirname(os.path.dirname(
 # with four simultaneous requests the two that waited ran out of budget and fell back,
 # and a fallback is worth about 76% of omega while a thread-starved native solve still
 # reaches omega. So concurrency is admitted and the THREAD BUDGET is shared instead.
-TOTAL_THREADS = int(os.environ.get("SN83_THREADS", "8"))
+def available_cores():
+    """Cores this process may actually use, honouring the cgroup CPU quota.
+
+    os.cpu_count() reports the HOST's cores, and in a container that is routinely wrong
+    by an order of magnitude: the box this was developed on reports 128 against a quota
+    of 15. A solver sizing its pool from cpu_count there spawns 128 threads for 15 cores,
+    which does not error -- every thread is simply throttled, and the search does less
+    work per second of a wall-clock-bounded budget. Miners on a VPS or in k8s are the
+    normal case, not the exception.
+    """
+    n = os.cpu_count() or 1
+    try:                                                  # cgroup v2
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+        if quota != "max":
+            n = min(n, max(1, int(int(quota) / int(period))))
+    except Exception:
+        pass
+    try:                                                  # cgroup v1
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+            q = int(f.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+            per = int(f.read())
+        if q > 0 and per > 0:
+            n = min(n, max(1, q // per))
+    except Exception:
+        pass
+    try:                                                  # explicit pinning
+        n = min(n, len(os.sched_getaffinity(0)))
+    except Exception:
+        pass
+    return max(1, n)
+
+
+# SN83_THREADS still wins when set, so an operator running several hotkeys on one box
+# can divide the budget between them explicitly. Unset, the default is the real core
+# count capped at 8, which is what min_compute.yml calls a recommended miner.
+TOTAL_THREADS = int(os.environ.get("SN83_THREADS", "0")) or min(8, available_cores())
 _active = 0
 _active_lock = threading.Lock()
 # Below this many seconds of remaining budget the native solve is not worth starting.
