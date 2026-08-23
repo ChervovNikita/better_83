@@ -231,6 +231,12 @@ each other — so our -0.169 is **2.8x its entire p10-p90 spread**. We sit at p2
 Both bootstrapped components exclude zero. Even at the optimistic end of its interval,
 a third of the gap remains structural.
 
+**The corrected picture (see FINDINGS for two superseded versions):** what we SUBMIT is
+behind the field median on **92% of rounds**, median deficit **-0.1032**. What our POOL
+could achieve with oracle selection ties the field median on the typical round
+(median 0.0000). **So the deficit is a selection problem on nearly every round** — the
+cliques needed are already in the pool, which is why reach is worth only +0.0016.
+
 **Reported as means; the medians tell a different story.** Selection headroom has median
 **+0.0125** (mean +0.0726). The irreducible residual has median **+0.0000** (mean
 -0.0694) and is negative on only 12% of rounds — so **on the typical round our own pool
