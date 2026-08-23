@@ -25,6 +25,32 @@ is the sanctioned scorer and does the paired sign test over changed prefixes onl
 | `replicator.py` | batched Motzkin-Straus with randomised regulariser |
 | `fleet_hull.py` | end-to-end fleet median vs field median from a pool file |
 | `MoMC2016.c` | Li & Jiang's exact enumerator, MIT. Build: `gcc -O3 -w -DMOMC -o momc MoMC2016.c -lm` |
+| **`pooling_guard.py`** | **run this before reporting any descriptive statistic.** See below. |
+
+## pooling_guard.py — the single most useful file here
+
+Eleven claims in `FINDINGS.md` were withdrawn. **Nine were the same error:** a statistic
+pooled across rounds of unequal size, reported as a property of the solver. Round size
+correlates with almost everything in this problem — optimum count, holder count,
+collision rate — so pooling manufactures effects that vanish within round.
+
+    from pooling_guard import check
+    check({"in_pool": [(round_id, value), ...], "out": [...]})
+
+It reports the contrast pooled AND within-round. If the pooled effect is large and the
+within-round effect is ~0, the pooled number is measuring round size.
+
+Cases it would have caught before they were published:
+
+| claim | pooled | within round | verdict |
+|---|---|---|---|
+| "reach bias 1.21-1.74" | +0.897 | **-0.006** | artifact |
+| "agreement predicts popularity" | +1.577 | **-0.019** | artifact |
+| same, on an independent 200-round rerun | +0.795 | **+0.039** | artifact |
+| "field sole-held 46.8% vs our 30%" | +0.076 | +0.064 | real (but median 0) |
+
+The paired scoring path (`score_pools.py`, `compare.py`) never produced a false positive
+in this project. Every retraction came from analysis written outside it.
 
 ## Scripts that use field data
 
