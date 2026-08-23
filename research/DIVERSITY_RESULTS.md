@@ -197,6 +197,14 @@ I mis-attributed this null twice before getting here: first as "larger hulls are
 does not work". Both were wrong, and both were recorded as general conclusions when
 they were scoped to one budget.
 
+## 5. Cross-check: two independent routes to the same gap
+
+Measured directly from logged field answers, without the simulator: our optimality is
+**1.0000** against the field's **0.9555**, and our diversity **0.5834** against **0.7245**.
+**We solve strictly better and score strictly worse**, and the whole deficit is
+uniqueness. The field is also one tight cluster — 256 of 270 hotkeys within **0.051** of
+each other — so our -0.169 is **2.8x its entire p10-p90 spread**. We sit at p2.
+
 ## 5a. Why everything failed — one sentence
 
 **The quantity we would need to condition on is not observable from our side at solve
