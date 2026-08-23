@@ -203,6 +203,22 @@ def worst_alive(streams, alive, joined, now, immunity_s, alpha=0.01):
     return best_id
 
 
+def _call_picker(picker, pool, uuid, hotkeys, ctx):
+    """Call a picker, passing round context only if it asks for it.
+
+    A picker that takes (pool, uuid, hotkeys) is a COORDINATED one: it sees the whole
+    queried list, which a deployed miner never does. A picker that also takes `ctx`
+    can model the deployed case instead, because difficulty and fleet size are things
+    an individual miner genuinely knows and can size its own decision from.
+    """
+    try:
+        n_args = picker.__code__.co_argcount
+    except AttributeError:
+        n_args = 3
+    return picker(pool, uuid, hotkeys, ctx) if n_args >= 4 \
+        else picker(pool, uuid, hotkeys)
+
+
 def _record(sink, rec, idents, keys, sizes, valid, rewards):
     """Append this round's SCORED submissions -- the single source of truth.
 
@@ -383,7 +399,10 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
             # The solver decides which hotkey submits what, including repeats and
             # deliberate silence. It returns a list aligned with `picked`; an entry
             # that is empty/None means that hotkey answers nothing.
-            chosen = picker(pool, rec["uuid"], list(picked))
+            chosen = _call_picker(picker, pool, rec["uuid"], list(picked),
+                                  {"difficulty": d, "n": rec["n"],
+                                   "time_limit": rec.get("time_limit"),
+                                   "fleet_size": N})
             for o, c in zip(picked, chosen):
                 if not c:
                     sizes.append(0); valid.append(0); keys.append(("unserved", o))

@@ -146,3 +146,79 @@ def picker_maxonly(pool, uuid, hotkeys):
         return [[] for _ in hotkeys]
     mx = max(len(c) for c in pool)
     return picker([c for c in pool if len(c) == mx], uuid, hotkeys)
+
+
+def picker_deployed(pool, uuid, hotkeys, ctx):
+    """What a miner can actually do alone -- no coordinator, no shared pool.
+
+    The coordinated pickers above index by POSITION in the queried list. A deployed
+    miner never sees that list: CliqueAI/miner.py answers one synapse and shares no
+    state. Everything this picker uses is local:
+
+      * its own pool, from its own solve
+      * the task uuid and its own hotkey, both in the synapse
+      * the difficulty, also in the synapse
+      * its operator's fleet size, a constant it is configured with
+
+    From those it sizes the round itself with needed(), which is the same estimate the
+    coordinator would make, and indexes by hash(hotkey|uuid) rather than by position.
+    Two siblings can then land on the same entry by chance -- that is the birthday cost
+    of dropping the coordinator, and it is exactly what this picker exists to measure.
+    """
+    if not pool:
+        return [[] for _ in hotkeys]
+    q = needed(ctx.get("fleet_size", len(hotkeys)), ctx.get("difficulty", 0.8))
+    mx = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == mx]
+    if len(top) >= q:
+        use = top
+    else:
+        spare = sorted((c for c in pool if len(c) < mx), key=len, reverse=True)
+        use = top + spare[:q - len(top)]
+    return [pick(use, uuid, hk) for hk in hotkeys]      # rank=None -> hash indexing
+
+
+_ALT = None
+
+
+def _alt_pool(uuid):
+    """A pool from an INDEPENDENT solve of the same round, if one is cached.
+
+    Point SN83_ALT_CACHE at a second `--cache` file produced by a separate fleet_sim
+    --solve of the same rounds. Nothing about that run needs to differ deliberately:
+    solve_one is multithreaded and the harvest loop is bounded by wall clock, so two
+    runs on the same machine already diverge exactly the way two miners would.
+    """
+    global _ALT
+    if _ALT is None:
+        import json
+        import os
+        path = os.environ.get("SN83_ALT_CACHE", "")
+        _ALT = {}
+        if path and os.path.exists(path):
+            with open(path) as f:
+                for line in f:
+                    r = json.loads(line)
+                    _ALT[r["uuid"]] = r["cliques"]
+    return _ALT.get(uuid)
+
+
+def picker_diverged(pool, uuid, hotkeys, ctx):
+    """picker_deployed, but half the fleet solved the round for itself.
+
+    This is the deployment gate. Every coordinated number we have -- the shipped
+    duplicate picker's +0.385 at N=40, and backfill -- is measured with one shared
+    pool handed to every sibling. Deployed, each miner solves independently and the
+    pools differ. Splitting the fleet across two real, independently produced caches
+    measures what that costs. If the answer is 'nothing', the harvest does not need to
+    be made deterministic; if the gain collapses, it does.
+    """
+    alt = _alt_pool(uuid)
+    if not alt:
+        return picker_deployed(pool, uuid, hotkeys, ctx)
+    out = []
+    for hk in hotkeys:
+        mine = alt if (int(hashlib.sha1(str(hk).encode()).hexdigest()[:8], 16) & 1) \
+            else pool
+        out.extend(picker_deployed(mine, uuid, [hk], ctx))
+    return out
