@@ -45,3 +45,31 @@ neither does any oracle measurement taken this generation.
 Reproduce with the snippet in `~/autoresearch-runs/sn83-clique/FINDINGS.md` under
 "auditing the BRIEF's own premises", or re-run against `data/sim_rounds.jsonl` +
 `data/sim_ts.jsonl`.
+
+---
+
+# 2026-08-23 evening — the STATE block after the deployment audit
+
+The corrections above are about the research solver. This section corrects claims that
+were true of the research solver and false of production, plus claims the 1000-round
+paired run superseded.
+
+| STATE claim | status | replacement |
+|---|---|---|
+| "SHIPPED champion v7_fastscan, promoted to native/clique.cpp" | **misleading** | Promoted WITHIN the research harness. `CliqueAI/miner.py` called `nx.approximation.max_clique` until commit c67afbe. Production never ran it. Worth +0.7276/answer |
+| "optimality is pinned at 1.0; all headroom is diversity" | true of research, **false of production** | Production's greedy approximation reaches ~76% of omega. Optimality is pinned only once the champion is wired in |
+| "SHIPPED: never-go-silent picker, +0.385 at N=40" | **needs a coordinator** | Measured with one shared pool and rank assignment. Deployed, each hotkey is a separate process with no shared state. Hash assignment costs -0.1664/hotkey (1000 rounds) |
+| "Reach, not selection, is the constraint" | **retracted** | Nine reach mechanisms null; novel share pinned at 25.0% across 3 hull sizes and 4 padding rules. The constraint is SELF-COLLISION: 16.26% of our answer pairs identical, against 0.00-0.98% for field entities |
+| "the field is ~34 coordinated miners covering ~25 optima" | **wrong shape** | FIVE entities by coldkey linkage: 77 / 60 / 44 / 38 / 20 hotkeys. ~24 distinct cliques per round at 1.77 holders each |
+| "the gap is -0.14 like-for-like" | **cache-dependent** | -0.2922 on a cache with max-size median 4; -0.14 came from one with median 15. Gap size tracks harvest depth |
+| "diversity is SIZE-BLIND, pays for uniqueness at any size" | true but **incomplete** | It pays through `pr`, which counts answers strictly larger. So a unique omega-1 is cheap only when few answers sit above it -- which is why the field spreads exactly when nOm is small |
+
+## What actually constrains us, measured on 1000 paired rounds
+
+    assignment (rank vs hash)   +0.2059 gap closure   PRIVATE
+    backfill (omega-1)          +0.0137 gap closure   mostly a public good
+    everything else measured this generation:  null
+
+The single largest measured effect in the whole project is not a solver property. It is
+that `CliqueAI/miner.py` did not call the solver, and that on any branch but main the
+miner restart-loops every 12 seconds without serving a request.
