@@ -241,9 +241,14 @@ starting premise — "reach, not selection, is the constraint" — was backwards
 
 ## 5b. The diagnosis in its final form
 
-Restricted to max-size answers, where we and the field play the same game: the field is
-**sole holder 46.8%** of the time, we are **~30%**. That 17-point difference IS the
--0.169. We are not solving worse (optimality 1.0000 vs 0.9555), not in the wrong size
+Restricted to max-size answers: pooled over 279 rounds the field is sole holder **41.2%**
+of the time against our **33.6%** (+7.6 points). **Within round the mean gap is +6.4
+points but the MEDIAN is +0.0, and the field is ahead on only 106 of 279 rounds (38%).**
+
+So the honest statement is **not** "we are uniformly worse at uniqueness" — on the
+typical round we are tied. We lose on a minority of rounds by a large margin. (An earlier
+draft quoted 46.8% vs 30% from a narrower subset; those figures do not reproduce on the
+full set.) We are not solving worse (optimality 1.0000 vs 0.9555), not in the wrong size
 class (max-size earns 2.5177 vs 2.4276 one below, so the third of the field going below
 max is losing reward), and not short of cliques (133.9 available, 8 submitted).
 
