@@ -132,6 +132,29 @@ def expected_within_round(per_round):
     return exp
 
 
+def poisson_tail(obs, exp):
+    """P(X <= obs) when X ~ Poisson(exp). The evidence that a pair collides LESS than
+    independence predicts.
+
+    A raw floor on `expected` is the wrong test and rejected a real merge: B/D had 0
+    observed against 44.3 expected, which is P = e^-44.3 ~ 6e-20, yet a floor of 100
+    called it thin evidence. What matters is how improbable the observed count is under
+    the null, not how large the null is.
+    """
+    if exp <= 0:
+        return 1.0
+    # sum_{k<=obs} e^-exp exp^k / k!, computed in log space for large exp
+    tot = 0.0
+    term = math.exp(-exp) if exp < 700 else 0.0
+    if term == 0.0 and obs == 0:
+        return math.exp(-exp) if exp < 700 else 0.0
+    for k in range(0, obs + 1):
+        if k:
+            term *= exp / k
+        tot += term
+    return min(1.0, tot)
+
+
 def merge_groups(obs, exp, tot, labels, ratio_max, min_expected):
     """Union coldkey groups whose cross-collisions are far BELOW independence.
 
@@ -150,10 +173,15 @@ def merge_groups(obs, exp, tot, labels, ratio_max, min_expected):
     for g, h in itertools.combinations(sorted(labels), 2):
         k = (g, h) if g <= h else (h, g)
         e = exp.get(k, 0.0)
-        if e < min_expected:
+        o = obs.get(k, 0)
+        if e <= 0:
             continue
-        r = obs.get(k, 0) / e
-        if r <= ratio_max:
+        r = o / e
+        # min_expected is now a Poisson ALPHA, not a count floor. Merge when the
+        # observed count is improbably low under independence.
+        if poisson_tail(o, e) > min_expected or r > ratio_max:
+            continue
+        if True:
             merges.append((g, h, obs.get(k, 0), e, r))
             a, b = find(g), find(h)
             if a != b:
@@ -190,9 +218,12 @@ def main():
                     help="merge two coldkey groups into one entity when their observed "
                          "collisions are below this multiple of the independence "
                          "expectation (default 0.35)")
-    ap.add_argument("--min-expected", type=float, default=100.0,
-                    help="do not merge on fewer than this many expected collisions; "
-                         "below it the ratio is noise (default 100)")
+    ap.add_argument("--min-expected", type=float, default=1e-6, metavar="ALPHA",
+                    help="Poisson tail alpha: merge two coldkey groups when P(X <= "
+                         "observed) under independence is below this (default 1e-6). "
+                         "This replaced a raw floor on the expected count, which "
+                         "rejected a pair with 0 observed against 44.3 expected -- "
+                         "P ~ 6e-20 -- as 'thin evidence'.")
     ap.add_argument("--no-merge", action="store_true",
                     help="report raw coldkey groups without linkage detection")
     ap.add_argument("--json", default=None, help="also write the matrix here")
