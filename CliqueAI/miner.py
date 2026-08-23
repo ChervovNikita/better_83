@@ -55,7 +55,12 @@ class Miner(BaseMinerNeuron):
             # the solver is reproducible in practice (same clique on 5 of 5 runs with
             # the default seed), and each hotkey is its own process with no shared
             # state. The scorer pays diversity = 1 / holders, so a fleet of N would
-            # earn 1/N of the diversity term. Measured cost: -0.8954 per answer.
+            # earn 1/N of the diversity term. Measured over 8 rounds against the real
+            # scorer this is worth +0.2936 per answer, helping 7 rounds and hurting 0.
+            # (The 0.8954 figure elsewhere is the CEILING -- all-same versus 8 distinct
+            # omega cliques each assumed unique. Realized is a third of it, because
+            # seeding only removes the holders that were OURS and the field already
+            # holds 67.5% of our pool.)
             seed=solver_seed(self.wallet.hotkey.ss58_address, synapse.uuid),
             fallback=lambda: networkx_algorithm(synapse.number_of_nodes, adjacency_list),
         )
