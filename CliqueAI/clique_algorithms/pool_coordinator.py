@@ -63,6 +63,7 @@ def _sweep():
 
 
 _pub_count = 0
+_claim_count = 0
 
 
 def publish(uuid, pool):
@@ -173,6 +174,14 @@ def claim_clique(uuid, hotkey, clique):
     except OSError:
         return True                      # cannot coordinate: do not block the answer
     import hashlib
+    # The dedup coordinator never calls publish(), so the TTL sweep that publish()
+    # triggers never ran in the path that actually ships. Measured: 103 task directories
+    # and 6.1 MB of tmpfs after 103 rounds, growing without bound. Sweeping here every
+    # 64th claim covers the dedup design the same way publish() covers the shared-pool one.
+    global _claim_count
+    _claim_count += 1
+    if _claim_count % 64 == 1:
+        _sweep()
     # Record participation BEFORE the outcome is known. A hotkey whose clique is already
     # taken still participated, and those are exactly the hotkeys that need the
     # convergence signal -- a fleet that all lands on one clique produces one successful
