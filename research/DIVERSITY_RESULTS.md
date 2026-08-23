@@ -231,10 +231,14 @@ each other — so our -0.169 is **2.8x its entire p10-p90 spread**. We sit at p2
 Both bootstrapped components exclude zero. Even at the optimistic end of its interval,
 a third of the gap remains structural.
 
-Even with perfect selection AND perfect reach we land 0.069 below the field median. On a
-saturated round every optimum is already held, so the best available move is to halve an
-incumbent's diversity by sharing their clique while they keep 1/1. No algorithm
-addresses that.
+**Reported as means; the medians tell a different story.** Selection headroom has median
+**+0.0125** (mean +0.0726). The irreducible residual has median **+0.0000** (mean
+-0.0694) and is negative on only 12% of rounds — so **on the typical round our own pool
+already contains cliques that would match the field median, and there is no structural
+shortfall.** The mean is carried by a minority of rounds with a large deficit.
+
+The earlier claim that "roughly half the gap cannot be closed" is withdrawn: it holds for
+the mean, not the median, and this project's own rule is median-not-mean.
 
 **The lever this generation pursued (reach) had 1% of the available headroom.** The
 starting premise — "reach, not selection, is the constraint" — was backwards.
