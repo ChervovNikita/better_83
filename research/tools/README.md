@@ -64,3 +64,24 @@ exist to bound what is reachable in principle. Do not build a solver around them
 unsigned negate. Measured as harmless on these instances (0 of 4372 vertices have zero
 connection to the hull, and pad order is identical either way) and fixed. It would NOT
 be harmless on sparse graphs.
+
+## collide.py — pairwise collision matrix between entities
+
+Builds the entity-vs-entity identical-clique rate from `fleet_sim --dump-submissions`,
+never from `data/sim_rounds.jsonl`. Two reasons that distinction is load-bearing:
+`sim_rounds` still contains field hotkeys our fleet deregisters, and our own row cannot
+be reconstructed from it at all — what each of our hotkeys submits is the picker's
+decision, and `fleet_pick.picker` wraps modularly on a short pool, so it repeats on
+purpose. Slicing `pool[:k]` off a distinct pool makes our self-collision 0.00% by
+construction; the measured rate is ~14%.
+
+    python3 fleet_sim.py --sizes 40 --rounds 1000 --picker fleet_pick:picker \
+        --dump-submissions subs.jsonl
+    python3 tools/collide.py subs.jsonl
+
+Coldkeys with >=15 hotkeys are named separately, the rest pooled as `indep`. Coldkey
+groups are then merged into one entity when their observed collisions fall below
+`--merge-ratio` times the independence expectation, which is computed per round from
+that round's own clique multiset rather than from a pooled global rate — pooling would
+attribute round-difficulty structure to the entities. `--min-expected` refuses to merge
+on thin evidence; `--no-merge` reports raw coldkey groups.

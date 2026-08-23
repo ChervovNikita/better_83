@@ -30,6 +30,7 @@ that ARE fitted, such as a collision picker, which can overfit a held-out set.
     python3 fleet_sim.py --sizes 1 5 10 20 40 --rounds 1000     # replay only
 """
 import argparse
+import importlib
 import collections
 import json
 import os
@@ -202,9 +203,38 @@ def worst_alive(streams, alive, joined, now, immunity_s, alpha=0.01):
     return best_id
 
 
+def _record(sink, rec, idents, keys, sizes, valid, rewards):
+    """Append this round's SCORED submissions -- the single source of truth.
+
+    `idents`/`keys` are what score_round consumed, so they already reflect
+    deregistration (field hotkeys our fleet displaced are gone) and whatever the
+    picker decided, including repeats and deliberate silence. Anything that
+    rebuilds this from rec["answers"] is reconstructing, not observing, and will
+    disagree: it keeps displaced field answers and cannot see picker repeats.
+    """
+    sink.append({
+        "uuid": rec["uuid"],
+        "difficulty": rec["difficulty"],
+        "n": rec["n"],
+        "answers": [
+            {"who": str(i),
+             "ours": str(i).startswith("OURS-"),
+             "size": int(sz),
+             "valid": int(v),
+             "reward": float(rw),
+             # an unserved hotkey has a non-tuple-of-int key; store None so the
+             # consumer cannot mistake it for a clique
+             "clique": (list(k) if (v and isinstance(k, tuple)
+                                    and all(isinstance(x, int) for x in k))
+                        else None)}
+            for i, k, sz, v, rw in zip(idents, keys, sizes, valid, rewards)],
+    })
+
+
 def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
            apply_dereg=True, null=False, sample="real",
-           warmup_s=WARMUP_BLOCKS * BLOCK_S, picker=None):
+           warmup_s=WARMUP_BLOCKS * BLOCK_S, picker=None,
+           submissions=None):
     """Replay the real rounds in order, with our fleet in place of N miners.
 
     Identity is the HOTKEY, not the uid slot, because slots get recycled. Three
@@ -366,6 +396,8 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
                     keys.append(t)
                 idents.append(o)
             rewards = score_round(sizes, valid, keys, d)
+            if submissions is not None:
+                _record(submissions, rec, idents, keys, sizes, valid, rewards)
             if null:
                 surv = [r for r, i in zip(rewards, idents)
                         if not str(i).startswith("OURS-")]
@@ -391,6 +423,8 @@ def replay(rounds, cache, meta, N, seed, validity, immunity_s=20 * 3600,
             idents.append(o)
 
         rewards = score_round(sizes, valid, keys, d)
+        if submissions is not None:
+            _record(submissions, rec, idents, keys, sizes, valid, rewards)
         if null:
             surv = [r for r, i in zip(rewards, idents) if not str(i).startswith("OURS-")]
             if surv:
@@ -595,6 +629,13 @@ def main():
                     help="6000 blocks x 12s. Measured in wall clock from the round "
                          "timestamps, because two validators interleave at ~105 rounds "
                          "an hour and a round count would misdate it.")
+    ap.add_argument("--dump-submissions", default=None,
+                    help="write every SCORED submission (ours and the field's) to "
+                         "this JSONL, one record per round. Only the first --sizes "
+                         "entry and the base seed are dumped, with null off. This is "
+                         "the input tools/collide.py consumes; build collision or "
+                         "overlap statistics from it rather than from sim_rounds, "
+                         "which still contains hotkeys our fleet deregistered.")
     ap.add_argument("--null-seeds", type=int, default=30,
                     help="zero-skill control runs: our hotkeys draw a reward from the "
                          "round's own survivors. A share inside the null is noise.")
@@ -686,13 +727,17 @@ def main():
           f"{'median rank':>12} {'fleet share':>12} {'null p5':>9} {'null p95':>9} "
           f"{'a/day':>8} {'survived':>9} {'dereg':>6}")
     results = []
+    dumped_subs = []
     for N in args.sizes:
         def one(seed, null):
+            sink = (dumped_subs if (args.dump_submissions and not null
+                                    and seed == args.seed and N == args.sizes[0]
+                                    and not dumped_subs) else None)
             streams, victim_uids, our_ids, alive, events, hk_uid = replay(
                 rounds, cache, meta, N, seed, validity,
                 immunity_s=args.immunity_hours * 3600.0,
                 apply_dereg=args.apply_dereg, null=null, sample=args.sample,
-                picker=picker)
+                picker=picker, submissions=sink)
             sc = ema_scores(streams)
             vec, ours = score_vector(sc, meta, victim_uids, our_ids, alive, hk_uid)
             survived = sum(1 for o in our_ids if o in alive)
@@ -748,6 +793,16 @@ def main():
               "about the solver — raise --rounds.", file=sys.stderr)
     out = os.path.join(DATA_DIR, "fleet_sim_results.json")
     json.dump(results, open(out, "w"), indent=1)
+
+    if args.dump_submissions:
+        with open(args.dump_submissions, "w") as f:
+            for rec in dumped_subs:
+                f.write(json.dumps(rec) + "\n")
+        n_ans = sum(len(r["answers"]) for r in dumped_subs)
+        n_our = sum(1 for r in dumped_subs for a in r["answers"] if a["ours"])
+        print(f"\n  wrote {len(dumped_subs)} rounds / {n_ans} scored submissions "
+              f"({n_our} ours) at N={args.sizes[0]} seed={args.seed} "
+              f"-> {args.dump_submissions}")
 
     # the field leaderboard for the largest fleet, which is the case that most
     # changes the field
