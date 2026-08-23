@@ -166,6 +166,7 @@ def claim_clique(uuid, hotkey, clique):
     key = ",".join(str(int(v)) for v in sorted(clique))
     if not key:
         return False
+    size = len(clique)
     d = _task_dir(uuid)
     try:
         os.makedirs(d, exist_ok=True)
@@ -173,7 +174,13 @@ def claim_clique(uuid, hotkey, clique):
         return True                      # cannot coordinate: do not block the answer
     import hashlib
     h = hashlib.sha1(key.encode()).hexdigest()[:24]
-    slot = os.path.join(d, "cq." + h)
+    # The size is in the NAME so distinct_claimed can count only max-size claims.
+    # Counting every claim makes the signal measure its own output: each omega-1 spread
+    # increments it, so after two spreads the agreement threshold is exceeded and the
+    # remaining siblings stop spreading. Measured on round n=494 (nOm=1) that capped the
+    # gain at +0.1823 with 3 distinct answers, where the boundary analysis says a
+    # correctly-spread starved round is worth about +0.57.
+    slot = os.path.join(d, "cq.%d." % size + h)
     me = str(hotkey).encode()[:200]
     try:
         fd = os.open(slot, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -208,6 +215,18 @@ def distinct_claimed(uuid):
     """
     d = _task_dir(uuid)
     try:
-        return sum(1 for f in os.listdir(d) if f.startswith("cq."))
+        best = -1
+        counts = {}
+        for f in os.listdir(d):
+            if not f.startswith("cq."):
+                continue
+            try:
+                sz = int(f.split(".")[1])
+            except (IndexError, ValueError):
+                continue
+            counts[sz] = counts.get(sz, 0) + 1
+            if sz > best:
+                best = sz
+        return counts.get(best, 0)          # distinct claims at the LARGEST size only
     except OSError:
         return 0
