@@ -73,6 +73,7 @@ def available_cores():
 TOTAL_THREADS = int(os.environ.get("SN83_THREADS", "0")) or min(8, available_cores())
 _active = 0
 _active_lock = threading.Lock()
+_WARNED = False
 # Below this many seconds of remaining budget the native solve is not worth starting.
 MIN_BUDGET_S = float(os.environ.get("SN83_MIN_BUDGET_S", "0.75"))
 
@@ -133,7 +134,25 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
     upstream algorithm. If it is None and the native path fails, an empty list is
     returned, which the validator scores as zero -- so always pass one.
     """
-    def _fb():
+    def _fb(reason):
+        # Loud ONCE, then quiet. A silent fallback is the worst outcome here: the miner
+        # looks healthy, answers every request, and earns the approximation's reward
+        # forever. The deployment checklist says to confirm the first logged clique size
+        # is in the 20-60 range rather than single digits -- this is what makes that
+        # check possible.
+        global _WARNED
+        if not _WARNED:
+            _WARNED = True
+            try:
+                import bittensor as bt
+                bt.logging.warning(
+                    "SN83 native solver unavailable (%s); falling back to the upstream "
+                    "approximation. This costs roughly 0.73 reward per answer. Check "
+                    "that research/native/ ships with the deployment and that g++ is "
+                    "present for build.sh." % reason)
+            except Exception:
+                print("SN83 native solver unavailable (%s); using fallback" % reason,
+                      file=sys.stderr)
         try:
             return list(fallback()) if fallback is not None else []
         except Exception:
@@ -158,7 +177,7 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
 
         budget = deadline - time.monotonic()
         if budget < MIN_BUDGET_S:
-            return _fb()
+            return _fb("only %.2fs of budget left" % budget)
         # Share the cores rather than queue for them. Each in-flight solve takes an
         # equal slice, floor 1, so N simultaneous requests never ask the box for more
         # than TOTAL_THREADS between them.
@@ -175,6 +194,6 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
         clique = [int(x) for x in clique]
         if _is_valid_maximal_clique(A, clique):
             return sorted(clique)
-        return _fb()
-    except Exception:
-        return _fb()
+        return _fb("solver returned a clique that failed the maximality check")
+    except Exception as e:
+        return _fb("%s: %s" % (type(e).__name__, e))
