@@ -74,6 +74,20 @@ TOTAL_THREADS = int(os.environ.get("SN83_THREADS", "0")) or min(8, available_cor
 _active = 0
 _active_lock = threading.Lock()
 _WARNED = False
+_SIBLINGS = {}
+
+
+def _load_sibling(name):
+    """Import a module next to this one without initialising the package."""
+    import importlib.util
+    if name in _SIBLINGS:
+        return _SIBLINGS[name]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py")
+    spec = importlib.util.spec_from_file_location("_sn83_" + name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _SIBLINGS[name] = mod
+    return mod
 # Below this many seconds of remaining budget the native solve is not worth starting.
 MIN_BUDGET_S = float(os.environ.get("SN83_MIN_BUDGET_S", "0.75"))
 
@@ -139,6 +153,9 @@ def solver_seed(hotkey, uuid):
 # the difficulty, and its operator's fleet size, so it can estimate how many siblings
 # will be queried and whether the pool covers them.
 SPREAD = int(os.environ.get("SN83_SPREAD", "0"))
+# Shared-pool coordination between an operator's own hotkeys. Off by default because it
+# assumes the hotkeys share a filesystem; a single-hotkey operator gains nothing from it.
+COORD = int(os.environ.get("SN83_COORD", "0"))
 FLEET_SIZE = int(os.environ.get("SN83_FLEET_SIZE", "1"))
 
 
@@ -280,7 +297,33 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
             _active += 1
             share = max(1, TOTAL_THREADS // _active)
         try:
-            if SPREAD and hotkey is not None and uuid is not None:
+            if COORD and hotkey is not None and uuid is not None:
+                # Shared-pool path. Publish a harvest for this task if nobody has, then
+                # claim one clique from it. Claims are atomic and ordered, so siblings
+                # get DISTINCT entries -- no birthday collisions -- and the overflow
+                # naturally lands on omega-1 spares, which is the spread the field runs
+                # and which a lone miner cannot trigger (corr(ourTop, nOm) = 0.18-0.23 at
+                # any thread count; no synapse-observable beats |0.345|).
+                # Loaded by path, NOT via `from CliqueAI.clique_algorithms import ...`.
+                # That form runs the package __init__, which imports the GNN module and
+                # therefore torch, so a context without torch fails here rather than in
+                # the code that actually wants it. Production has torch, but a shim that
+                # only works when an unrelated optional dependency is installed is a trap.
+                pcoord = _load_sibling("pool_coordinator")
+                from fleet_solver import solve_many
+                pool = pcoord.fetch(uuid)
+                if pool is None:
+                    pool = [tuple(sorted(int(v) for v in c))
+                            for c in solve_many(A, budget, max(2, FLEET_SIZE), seed=seed)]
+                    pcoord.publish(uuid, pool)
+                    pool = pcoord.fetch(uuid, wait_s=0.05) or pool
+                idx = pcoord.claim(uuid, hotkey, len(pool)) if pool else None
+                if idx is not None and 0 <= idx < len(pool):
+                    clique = list(pool[idx])
+                else:
+                    clique = solve_one(A, max(0.5, deadline - time.monotonic()),
+                                       seed=seed, threads=share)
+            elif SPREAD and hotkey is not None and uuid is not None:
                 # Harvest a pool rather than a single clique, then decide locally.
                 # solve_many keeps maximal sub-omega cliques as spares (SN83_BACKFILL).
                 from fleet_solver import solve_many
