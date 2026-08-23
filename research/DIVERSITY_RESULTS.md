@@ -205,6 +205,18 @@ Measured directly from logged field answers, without the simulator: our optimali
 uniqueness. The field is also one tight cluster — 256 of 270 hotkeys within **0.051** of
 each other — so our -0.169 is **2.8x its entire p10-p90 spread**. We sit at p2.
 
+## 5b. The diagnosis in its final form
+
+Restricted to max-size answers, where we and the field play the same game: the field is
+**sole holder 46.8%** of the time, we are **~30%**. That 17-point difference IS the
+-0.169. We are not solving worse (optimality 1.0000 vs 0.9555), not in the wrong size
+class (max-size earns 2.5177 vs 2.4276 one below, so the third of the field going below
+max is losing reward), and not short of cliques (133.9 available, 8 submitted).
+
+The field reaches 46.8% by being **51 independent searches spread over ~18.5 max-size
+optima**. We are one search, and one search concentrates. That is a property of being a
+single actor in a crowd, not a deficiency of the solver.
+
 ## 5a. Why everything failed — one sentence
 
 **The quantity we would need to condition on is not observable from our side at solve
