@@ -232,6 +232,23 @@ The field reaches 46.8% by being **51 independent searches spread over ~18.5 max
 optima**. We are one search, and one search concentrates. That is a property of being a
 single actor in a crowd, not a deficiency of the solver.
 
+## 5c. The mechanism, measured directly
+
+For each field optimum, its holder count split by whether our pool contains it:
+
+| pool | holders IN pool | NOT in pool | bias ratio |
+|---|---|---|---|
+| LSCC pool | 2.141 | 1.769 | **1.21** |
+| hull pool (exact enumeration) | 2.139 | 1.701 | **1.26** |
+| field average | 2.116 | | 1.00 |
+
+The optima we hold are held by **21% more miners** than the ones we miss, and **exact
+enumeration reproduces this rather than reducing it** (2.139 vs 2.141 — a difference of
+0.002). Our reach bias is a property of WHERE we search, not how much.
+
+That single fact generates every null in this report. Sixteen mechanisms are not sixteen
+independent failures; they are one failure measured sixteen ways.
+
 ## 5a. Why everything failed — one sentence
 
 **The quantity we would need to condition on is not observable from our side at solve
