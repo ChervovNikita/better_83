@@ -352,7 +352,18 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
         # actually answered recent tasks, which is fleet_size * p(difficulty) -- the
         # number CONCURRENTLY QUERIED, not the number registered. A lone miner or a cold
         # start reads 1 and this reduces to the old expression exactly.
-        share = max(1, TOTAL_THREADS // max(in_process, fleet_size()))
+        # Divide the QUOTA, then cap -- not the other way round. TOTAL_THREADS is
+        # min(8, cores), a cap that was right when one process owned the budget and is
+        # wrong as a numerator: on a 15-core quota a 7-hotkey fleet got 8//7 = 1 thread
+        # each and left eight cores idle, which is the worst parity arm G79 measured
+        # (1 thread 98.0%, 2 threads 99.0%, 8 threads 100.0%).
+        #
+        # available_cores() honours the cgroup quota, so quota // fleet is the real
+        # share: 15//7 = 2, which is the number every measurement in research/ was taken
+        # at. The min() keeps the original cap as a ceiling for the lone-miner case,
+        # where fleet is 1 and the expression reduces to TOTAL_THREADS exactly.
+        _concurrent = max(in_process, fleet_size())
+        share = max(1, min(TOTAL_THREADS, available_cores() // _concurrent))
         try:
             if COORD and hotkey is not None and uuid is not None:
                 # Coordinated path: solve independently, deduplicate the results.
