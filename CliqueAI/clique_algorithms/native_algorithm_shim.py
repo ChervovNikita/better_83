@@ -445,7 +445,22 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                                 # deliberately -- more claimants on a rich round is
                                 # exactly the state where an omega-1 answer is taxed
                                 # hardest.
-                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "6"))
+                                # 99, i.e. no threshold. G62 (120 population-
+                                # proportional rounds at Q=14, the largest sample in the
+                                # series) puts thr99 at +0.0248 against thr6's +0.0196
+                                # and thr2/thr4 at +0.0205/+0.0214. The earlier "flat"
+                                # readings came from 40-80 round samples where the spread
+                                # was inside the noise.
+                                #
+                                # It is a real trade, not a free win. Removing the
+                                # threshold is worth +0.078 on single-maximum rounds and
+                                # +0.111 on the 2-3 band, and costs -0.017 on the 8+ band
+                                # which carries 71% of the weight. It nets +0.005.
+                                #
+                                # Safe at small fleets: at Q=7 a claim count of 7 means
+                                # nobody is displaced, so 6 and 99 are identical by
+                                # construction (G54, 0 of 72 rounds differ).
+                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "99"))
                                 if agree <= pthr:
                                     for cand in spares:
                                         if len(cand) == mmax - 1 and \
