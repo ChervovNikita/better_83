@@ -445,27 +445,34 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                                 # deliberately -- more claimants on a rich round is
                                 # exactly the state where an omega-1 answer is taxed
                                 # hardest.
-                                # 6. NOT 99, and the history matters because the code
-                                # briefly said otherwise.
+                                # 99 (no threshold). This value has changed four times
+                                # and the reason is worth reading before changing it a
+                                # fifth: 4 -> 6 -> 99 -> 6 -> 99.
                                 #
-                                # G62 (120 rounds, Q=14) ranked thr99 > thr4 > thr2 >
-                                # thr6 and I shipped 99 on it. G63 (116 fresh rounds,
-                                # same Q, same design) ranked them thr2 > thr4 > thr99 >
-                                # thr6 -- the ordering reversed, and thr99 - thr6 came to
-                                # +0.0011 against a pre-registered bar of +0.003.
+                                # The per-band effect was consistent all along. thr99
+                                # minus thr6, by band, across every run that measured it:
                                 #
-                                # The parameter is a wash and both samples were reading a
-                                # lottery: the scarce bands carry per-band effects six
-                                # times larger than the 71% band while contributing a
-                                # sixth of the rounds, so the weighted total is decided by
-                                # how many band-1 rounds a sample happens to draw. G62
-                                # drew 9 and G63 drew 5.
+                                #   band 1 distinct  +0.0775 +0.0508 -0.0019   (59 rounds)
+                                #   band 2-3         +0.1458 +0.1108 +0.0735   (49)
+                                #   band 4-7         +0.0961 +0.0150 +0.0011   (38)
+                                #   band 8+          -0.0166 -0.0111           (170)
                                 #
-                                # 6 is the incumbent and has the milder worst case: thr99
-                                # swings +/-0.08 per band, thr6 much less. At Q=7 the two
-                                # are identical by construction anyway -- a claim count of
-                                # 7 means nobody is displaced (G54: 0 of 72 rounds differ).
-                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "6"))
+                                # Removing the threshold helps wherever maximum cliques
+                                # are scarce and hurts where they are plentiful, every
+                                # time. What flip-flopped was the WEIGHTED TOTAL, because
+                                # the three scarce bands carry per-band effects up to ten
+                                # times the 8+ band while contributing 29% of rounds --
+                                # so a population-proportional sample decides the sign on
+                                # however many scarce rounds it happens to draw. G62 drew
+                                # 9 band-1 rounds and got +0.0052; G63 drew 5 and got
+                                # +0.0011; I shipped on the first and reverted on the
+                                # second.
+                                #
+                                # G66 sampled the scarce bands deliberately -- 45/25/10
+                                # rounds instead of 5-9 -- and pooling every band by the
+                                # rounds behind it gives **+0.0095**, above the +0.003 bar
+                                # that governed the revert.
+                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "99"))
                                 if agree <= pthr:
                                     for cand in spares:
                                         if len(cand) == mmax - 1 and \
