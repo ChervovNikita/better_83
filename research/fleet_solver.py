@@ -40,17 +40,28 @@ def _extend_to_maximal(A, members, rng):
     return sorted(np.flatnonzero(inC).tolist())
 
 
-def solve_many(A, time_limit, k, seed=0, threads=None, pool_mode=None):
+def solve_many(A, time_limit, k, seed=0, threads=None, pool_mode=None,
+               ban_n=None, champion_share=None):
     """Default: native champion, then a plateau walk for alternates.
 
-    `pool_mode` overrides SN83_POOL for this call. The shim needs it because the
-    environment is process-global while requests are served on threads, so setting
-    SN83_POOL around one harvest would change every concurrent harvest with it.
+    `pool_mode`, `ban_n` and `champion_share` override SN83_POOL, SN83_BAN_N and
+    SN83_CHAMPION_SHARE for this call. The shim needs them because the environment is
+    process-global while requests are served on threads, so setting those variables
+    around one harvest would change every concurrent harvest with it.
+
+    All three are per-call for the same reason, and they travel together: G82 measured
+    the scarce-round spread with pool_mode="ban", ban_n=1 and champion_share=0.35. Passing
+    the mode without the other two leaves nban at 3, which deletes three vertices and aims
+    the re-solve well below omega-1 -- so the harvest returns almost no omega-1 spares and
+    the spread rule falls through to repeating a sibling's answer. An integration run of
+    the deployed path caught exactly that: three hotkeys, one distinct clique, on a round
+    with a single maximum.
     """
     from fastsolver import solve as solve_one
 
     t0 = time.time()
-    share = float(os.environ.get("SN83_CHAMPION_SHARE", "0.75"))
+    share = (champion_share if champion_share is not None
+             else float(os.environ.get("SN83_CHAMPION_SHARE", "0.75")))
     # Thread budget. The shim computes `share = TOTAL_THREADS // active` so that N
     # concurrent requests never ask the box for more than the container quota, then
     # passes it to solve_one on the direct path. solve_many used to ignore it entirely
@@ -108,7 +119,7 @@ def solve_many(A, time_limit, k, seed=0, threads=None, pool_mode=None):
     # re-solves never reached omega at all. The doubling makes the arm safe on big
     # graphs without giving up the many-cheap-solves behaviour on small ones.
     if (pool_mode or os.environ.get("SN83_POOL")) == "ban":
-        nban = int(os.environ.get("SN83_BAN_N", "3"))
+        nban = ban_n if ban_n is not None else int(os.environ.get("SN83_BAN_N", "3"))
         frac = float(os.environ.get("SN83_BAN_FRAC", "0.05"))
         ban_spare = int(os.environ.get("SN83_BACKFILL", "1"))
         ban_margin = int(os.environ.get("SN83_BF_MARGIN", "1"))

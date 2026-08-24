@@ -353,7 +353,13 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                     for c in solve_many(A, max(0.5, deadline - time.monotonic()),
                                         int(os.environ.get("SN83_HARVEST_N", "10")),
                                         seed=seed, threads=share,
-                                        pool_mode="ban" if _scarce else None)]
+                                        pool_mode="ban" if _scarce else None,
+                                        # G82 measured the spread with these two, not
+                                        # with the defaults. nban defaults to 3, which
+                                        # aims the re-solve below omega-1 and starves the
+                                        # spare pool the rule depends on.
+                                        ban_n=1 if _scarce else None,
+                                        champion_share=0.35 if _scarce else None)]
                 if mine:
                     mmax = max(len(c) for c in mine)
                     ordered = [c for c in mine if len(c) == mmax]
