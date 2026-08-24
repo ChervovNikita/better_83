@@ -40,8 +40,13 @@ def _extend_to_maximal(A, members, rng):
     return sorted(np.flatnonzero(inC).tolist())
 
 
-def solve_many(A, time_limit, k, seed=0, threads=None):
-    """Default: native champion, then a plateau walk for alternates."""
+def solve_many(A, time_limit, k, seed=0, threads=None, pool_mode=None):
+    """Default: native champion, then a plateau walk for alternates.
+
+    `pool_mode` overrides SN83_POOL for this call. The shim needs it because the
+    environment is process-global while requests are served on threads, so setting
+    SN83_POOL around one harvest would change every concurrent harvest with it.
+    """
     from fastsolver import solve as solve_one
 
     t0 = time.time()
@@ -102,7 +107,7 @@ def solve_many(A, time_limit, k, seed=0, threads=None):
     # fixed 5% slice found 9 maxima on n=698 but only 1 on n=894, where 14 of 15
     # re-solves never reached omega at all. The doubling makes the arm safe on big
     # graphs without giving up the many-cheap-solves behaviour on small ones.
-    if os.environ.get("SN83_POOL") == "ban":
+    if (pool_mode or os.environ.get("SN83_POOL")) == "ban":
         nban = int(os.environ.get("SN83_BAN_N", "3"))
         frac = float(os.environ.get("SN83_BAN_FRAC", "0.05"))
         ban_spare = int(os.environ.get("SN83_BACKFILL", "1"))

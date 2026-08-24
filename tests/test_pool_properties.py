@@ -146,3 +146,36 @@ def test_the_coordinator_is_off_unless_three_variables_are_exported():
     assert hits == ["CliqueAI/clique_algorithms/native_algorithm_shim.py"], \
         "something outside research/ and tests/ now mentions SN83_COORD -- if a launcher " \
         "sets it, RESULTS.md step 5b should stop saying nothing does: %s" % hits
+
+
+def test_scarce_spread_is_off_by_default_and_switches_both_halves():
+    """G82's scarce-round spread is worth +0.0297 over the shipped policy on the 17.4% of
+    rounds that are scarce (95 better / 5 worse of 100). It is OFF by default because it
+    is measured only on bands 1 and 2-3 and costs -0.56 if it fires on band 8+.
+
+    The property that matters is that SN83_SCARCE_SPREAD switches BOTH halves. The rule
+    alone, on the ordinary plateau-walk harvest, scored -0.2019 on band 1 against the
+    shipped -0.1669 -- worse than not doing it. If a future edit gates the harvest and the
+    rule on different flags, or lets one default on without the other, the result is a
+    regression that looks like an improvement in the diff."""
+    src = open(SHIM).read()
+    assert 'os.environ.get("SN83_SCARCE_SPREAD", "0")' in src, \
+        "SN83_SCARCE_SPREAD must default to 0; it is measured on scarce rounds only"
+    # exactly one read of the flag, held in _scarce, used by both halves
+    assert src.count('SN83_SCARCE_SPREAD') == 1, \
+        "the flag is read once into _scarce so the harvest and the rule cannot diverge"
+    assert 'pool_mode="ban" if _scarce else None' in src, \
+        "with the flag on, the harvest must run in delete-and-resolve mode"
+    assert 'if _scarce and len(ordered) <= int(' in src, \
+        "the rule must be gated on the same _scarce and on the distinct-maximum count"
+
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "research"))
+    import inspect
+    try:
+        import fleet_solver
+    except Exception as exc:                      # pragma: no cover
+        pytest.skip("fleet_solver unavailable: %s" % exc)
+    assert "pool_mode" in inspect.signature(fleet_solver.solve_many).parameters, \
+        "solve_many must accept pool_mode; the environment is process-global and " \
+        "requests are served on threads, so SN83_POOL cannot be set around one harvest"

@@ -338,19 +338,66 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                                           solve_one(A, _t, seed=seed, threads=share)))
                     if _first and pcoord.claim_clique(uuid, hotkey, _first):
                         clique = list(_first)
+                # SCARCE-ROUND SPREAD (G82). Off by default; see the block below the
+                # claim loop for what it does and what it is worth. The harvest mode has
+                # to be decided BEFORE the harvest, and the detector it would use is a
+                # property OF the harvest, so when the rule is enabled the harvest always
+                # runs in delete-and-resolve mode and only the RULE is gated. G74 priced
+                # that: on band 8+ the ban harvest scores -0.0799 against ctl's -0.0751,
+                # so carrying it on rich rounds costs about -0.005, against +0.0297 on
+                # the scarce ones. `pool_mode` is passed rather than set in the
+                # environment because requests are served on threads.
+                _scarce = int(os.environ.get("SN83_SCARCE_SPREAD", "0"))
                 mine = [] if clique is not None else [
                     tuple(sorted(int(v) for v in c))
                     for c in solve_many(A, max(0.5, deadline - time.monotonic()),
                                         int(os.environ.get("SN83_HARVEST_N", "10")),
-                                        seed=seed, threads=share)]
+                                        seed=seed, threads=share,
+                                        pool_mode="ban" if _scarce else None)]
                 if mine:
                     mmax = max(len(c) for c in mine)
                     ordered = [c for c in mine if len(c) == mmax]
                     chosen = None
-                    for cand in ordered:
-                        if pcoord.claim_clique(uuid, hotkey, cand):
-                            chosen = cand
-                            break
+                    # SCARCE-ROUND SPREAD (G82, 100 scarce rounds, 50 per band).
+                    #
+                    # When the round holds very few maximum cliques, a maximum is the
+                    # WRONG answer for most of the fleet: only one hotkey can hold it
+                    # uncontested and the rest merely add to its holder count, which is
+                    # what the 1/count diversity term charges for. The field already
+                    # knows this -- on band-1 rounds 77.5% of their fifty-odd answers are
+                    # sole-held while only ONE distinct maximum exists, so most of them
+                    # are answering below omega on purpose.
+                    #
+                    # Measured, scarce rounds only, against the shipped policy:
+                    #     shipped (claim a maximum, spread only if displaced)   +0.0406
+                    #     every hotkey takes a distinct omega-1                 +0.0703
+                    #     95 better / 5 worse of 100 changed, median +0.4572
+                    # Band 2-3 goes POSITIVE at +0.0280 -- above the field.
+                    #
+                    # It only works on a delete-and-resolve pool. The same rule on the
+                    # ordinary plateau-walk harvest scored -0.2019 on band 1 against the
+                    # shipped -0.1669 -- WORSE than not doing it -- because the walk's
+                    # omega-1 cliques are the easy ones the field is already sitting on
+                    # (10.7 distinct against ban's 25.6). The rule and the search are one
+                    # mechanism, which is why the flag switches both.
+                    #
+                    # Gated on this hotkey's own distinct maximum count. Fleet-wide that
+                    # statistic runs 1.0 / 2.5 / 3.3 / 29.6 across the four bands (G74),
+                    # an order of magnitude between scarce and rich; per-hotkey it is
+                    # smaller, hence the default of 3 rather than 8. The rule MUST NOT
+                    # fire on rich rounds -- there it costs -0.56.
+                    if _scarce and len(ordered) <= int(
+                            os.environ.get("SN83_SCARCE_MAX_ND", "3")):
+                        for cand in sorted((c for c in mine if len(c) == mmax - 1),
+                                           key=len, reverse=True):
+                            if pcoord.claim_clique(uuid, hotkey, cand):
+                                chosen = cand
+                                break
+                    if chosen is None:
+                        for cand in ordered:
+                            if pcoord.claim_clique(uuid, hotkey, cand):
+                                chosen = cand
+                                break
                     if chosen is not None:
                         clique = list(chosen)
                     else:
