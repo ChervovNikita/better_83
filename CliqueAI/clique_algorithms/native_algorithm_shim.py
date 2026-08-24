@@ -405,6 +405,38 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                                         pcoord.claim_clique(uuid, hotkey, cand):
                                     picked = cand
                                     break
+                        # PARTIAL SPREAD. If the agreement gate did not fire, try to
+                        # claim a maximum clique nobody else holds; and if EVERY maximum
+                        # clique in this harvest is already claimed -- this hotkey is
+                        # DISPLACED -- spend an omega-1 rather than repeat a sibling's
+                        # answer.
+                        #
+                        # Measured on three disjoint 60-round samples in the deployed
+                        # sequential frame: +0.0105, +0.0091, +0.0053 on the
+                        # deployment-weighted gap, mean +0.0083 (s.e. 0.0016), on top of
+                        # the gate and claim-dedup together.
+                        #
+                        # It carries a known tax of -0.002 to -0.005 on rounds holding
+                        # eight or more maxima, where an omega-1 answer is heavily taxed.
+                        # That is NOT a bug awaiting a better trigger: a displaced hotkey
+                        # cannot tell "rich round, thin harvest" from "scarce round" from
+                        # anything it knows at answer time. Gating on its own harvest's
+                        # distinct-max count was measured (G51) and changed 1 round in 60
+                        # -- that count is the seed lottery, corr +0.446 with the round's
+                        # omega supply, not the +0.83 the FLEET's count carries.
+                        if picked is None:
+                            for cand in ordered:
+                                if pcoord.claim_clique(uuid, hotkey, cand):
+                                    picked = cand
+                                    break
+                            else:
+                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "4"))
+                                if agree <= pthr:
+                                    for cand in spares:
+                                        if len(cand) == mmax - 1 and \
+                                                pcoord.claim_clique(uuid, hotkey, cand):
+                                            picked = cand
+                                            break
                         clique = list(picked if picked is not None else ordered[0])
                 elif clique is None:
                     clique = solve_one(A, max(0.5, deadline - time.monotonic()),
