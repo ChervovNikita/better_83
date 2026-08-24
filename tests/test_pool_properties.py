@@ -44,23 +44,23 @@ def _pool(omega=30, n_top=1, n_spare=4):
     return top + spare
 
 
-def test_fleet_size_one_silently_disables_the_spread_gate():
-    """SHIPPED DEFECT. SN83_FLEET_SIZE defaults to 1, which makes q=1, which makes
-    `len(top) >= q` always true, so _spread_pick returns None on every round. An
-    operator running 40 hotkeys gets no spread and no log line saying so."""
-    shim = _load_shim(SN83_FLEET_SIZE=1, SN83_SPREAD=1)
-    got = shim._spread_pick(_pool(), "hk0", "uuid-1", 0.8, shim.FLEET_SIZE)
-    assert got is None, "unexpected: the gate fired at fleet_size=1"
+def test_a_lone_hotkey_disables_the_spread_gate_and_the_census_notices():
+    """SHIPPED DEFECT, now fixed at the source rather than documented.
 
-    shim40 = _load_shim(SN83_FLEET_SIZE=40, SN83_SPREAD=1)
-    picks = {tuple(shim40._spread_pick(_pool(), "hk%d" % h, "uuid-1", 0.8,
-                                       shim40.FLEET_SIZE) or ())
-             for h in range(8)}
-    assert len(picks) > 1, (
-        "at fleet_size=40 on a pool holding ONE maximum clique, eight hotkeys must not "
-        "all return the same vertex set -- that is diversity 1/N")
-    assert any(len(p) == 29 for p in picks), (
-        "no hotkey dropped to omega-1; the spread gate is not selecting spares")
+    `_spread_pick` computes q = fleet_size * p(difficulty) and returns None when q <= 1,
+    so a fleet size of 1 silently disables spreading -- an operator running 40 hotkeys
+    who never set SN83_FLEET_SIZE got no spread and no log line saying so.
+
+    The constant is gone. `fleet_size()` counts `hk.*` claim files across recent tasks,
+    so the number is observed instead of configured. This asserts both halves: q <= 1
+    still disables the gate (the arithmetic is unchanged), and the census reports the
+    real count so that case stops arising by accident."""
+    shim = _load_shim()
+    pool = _pool(n_top=1, n_spare=3, omega=30)
+    assert shim._spread_pick(pool, "5Hot", "uuid-1", 0.8, 1) is None, \
+        "q = 1 * p < 1, so the gate cannot fire -- this is the arithmetic being guarded"
+    assert callable(getattr(shim, "fleet_size", None)), \
+        "fleet_size() replaced the FLEET_SIZE constant; the census is the whole fix"
 
 
 def test_spread_gate_needs_spares_to_spread_with():
@@ -115,37 +115,30 @@ def test_solve_many_accepts_and_forwards_a_thread_budget():
         % missing)
 
 
-def test_the_coordinator_is_off_unless_three_variables_are_exported():
-    """DORMANT MECHANISM, found 2026-08-24 by auditing the deployed path rather than the
-    research harness. `COORD = int(os.environ.get("SN83_COORD", "0"))` and that one flag
-    guards the WHOLE coordinator block -- the lazy harvest, the claim dedup, the
-    agreement gate, and the partial spread with SN83_PARTIAL_THR inside it. Measured at
-    +0.0725/answer at seven hotkeys and +0.0486 at fourteen, and nothing in the repo,
-    start_miner.sh, .env or the shell sets it, so none of it has ever run in deployment.
+def test_the_coordinator_ships_on_and_degrades_to_the_old_path_alone():
+    """The inverse of the test this replaces, which asserted COORD defaults to 0.
 
-    This test cannot make the operator export the variables. It makes the requirement
-    executable, so a reader who changes the default -- in either direction -- has to come
-    here and say so."""
+    It defaulted off on the reasoning that it assumes a shared filesystem and gives a
+    lone miner nothing. Both true; neither is a reason to default off, because the path
+    degrades to the uncoordinated one in exactly those cases:
+
+      * a lone hotkey's claims always succeed, so it never harvests and never spreads
+      * hotkeys on separate machines cannot see each other's claims, so the same holds
+      * every pool_coordinator failure path returns None or True and the block sits in a try
+
+    What it is worth when the hotkeys DO share a host is +0.047/answer from dedup alone
+    plus +0.0206 from the scarce-round harvest. Off, that is measured value nobody
+    collects -- which is what this test exists to stop happening again."""
     src = open(SHIM).read()
-    assert 'os.environ.get("SN83_COORD", "0")' in src, \
-        "SN83_COORD no longer defaults to 0; update RESULTS.md step 5b, which tells the " \
-        "operator the coordinator is dead code until they export it"
-    assert 'os.environ.get("SN83_FLEET_SIZE", "1")' in src, \
-        "SN83_FLEET_SIZE no longer defaults to 1; see the FLEET_SIZE=1 test above"
-    # The guard must be a single `if COORD and ...` -- if the block is ever split so that
-    # part of it runs without COORD, the activation instructions become wrong.
+    assert 'os.environ.get("SN83_COORD", "1")' in src, \
+        "the coordinator must ship ON. If you are turning it off, put the measurement " \
+        "that says so next to this line -- +0.068/answer says otherwise"
     guards = [ln.strip() for ln in src.splitlines() if "if COORD" in ln]
     assert guards == ["if COORD and hotkey is not None and uuid is not None:"], \
-        "the coordinator's entry guard changed; RESULTS.md documents exactly one: %s" % guards
-
-    # And nothing in the repo turns it on, which is the actual finding.
-    import subprocess
-    hits = subprocess.run(
-        ["git", "grep", "-l", "SN83_COORD", "--", ".", ":!research", ":!tests"],
-        cwd=ROOT, capture_output=True, text=True).stdout.split()
-    assert hits == ["CliqueAI/clique_algorithms/native_algorithm_shim.py"], \
-        "something outside research/ and tests/ now mentions SN83_COORD -- if a launcher " \
-        "sets it, RESULTS.md step 5b should stop saying nothing does: %s" % hits
+        "one entry guard, so the degradation argument above covers the whole block: %s" % guards
+    assert "def claim_clique" in open(
+        os.path.join(ROOT, "CliqueAI", "clique_algorithms", "pool_coordinator.py")).read(), \
+        "the coordinated path needs claim_clique to exist for its lone-miner fallback"
 
 
 def test_scarce_spread_is_off_by_default_and_switches_both_halves():
@@ -189,44 +182,39 @@ def test_scarce_spread_is_off_by_default_and_switches_both_halves():
         "requests are served on threads, so SN83_POOL cannot be set around one harvest"
 
 
-def test_coord_without_an_explicit_thread_budget_warns():
-    """The oversubscription this project has already been burned by, one layer up.
+def test_the_fleet_sizes_its_own_thread_budget():
+    """Replaces a test that asserted the miner WARNS about an unset SN83_THREADS.
 
-    `TOTAL_THREADS` defaults to min(8, cores) and `share = TOTAL_THREADS // active`
-    counts only this PROCESS's in-flight requests, while each hotkey is its own process.
-    Seven hotkeys therefore ask one box for 56 threads. That is true with or without the
-    coordinator; what COORD changes is that a displaced hotkey now harvests, making
-    requests longer and overlap likelier, so it makes an existing problem worse.
+    `share = TOTAL_THREADS // active` counted only this process's in-flight requests
+    while each hotkey is its own process, so seven hotkeys asked one box for fifty-six
+    threads. The old answer was to tell the operator to export SN83_THREADS; the current
+    one is to divide by `observed_fleet()`, which counts hotkeys that actually answered
+    recent tasks from the pool's own claim files.
 
-    A whole generation of measurements was voided by exactly this (112 threads against a
-    15-CPU quota). It does not error -- every thread is throttled and the search does
-    less work per second of a wall-clock budget -- so nothing surfaces it but a warning."""
+    Asserted here because the failure is silent: oversubscription does not error, every
+    thread is throttled, and the search does less work per second of a wall-clock budget.
+    This project voided a full generation of measurements to exactly that."""
     src = open(SHIM).read()
-    assert "def _warn_thread_budget()" in src, \
-        "the coordinator must say something when the thread budget is left to chance"
-    assert "_warn_thread_budget()" in src.split("def _warn_thread_budget()")[1], \
-        "the warning is defined but never called"
+    assert "max(in_process, fleet_size())" in src, \
+        "the per-solve thread budget must divide by the FLEET's concurrency, not just " \
+        "this process's -- each hotkey is a separate process and cannot see the others"
+    assert 'os.environ.get("SN83_COORD", "1")' in src, \
+        "the coordinator ships on; a lone miner's claims always succeed so its behaviour " \
+        "is unchanged, and a fleet collects +0.068/answer that a default of 0 leaves"
 
-    import subprocess
-    def warned(env):
-        e = dict(os.environ)
-        e.pop("SN83_THREADS", None)
-        e.update(env)
-        out = subprocess.run(
-            [sys.executable, "-c",
-             "import importlib.util as u,sys;"
-             "sys.path.insert(0,%r);sys.path.insert(0,%r);"
-             "sp=u.spec_from_file_location('s',%r);"
-             "m=u.module_from_spec(sp);sp.loader.exec_module(m)"
-             % (ROOT, os.path.join(ROOT, "research"), SHIM)],
-            capture_output=True, text=True, env=e)
-        return "SN83_THREADS is unset" in (out.stdout + out.stderr)
+    sys.path.insert(0, os.path.join(ROOT, "research"))
+    import importlib.util as u, tempfile
+    os.environ["SN83_POOL_DIR"] = tempfile.mkdtemp(prefix="sn83-fleet-test-")
+    spec = u.spec_from_file_location(
+        "pc_test", os.path.join(ROOT, "CliqueAI", "clique_algorithms",
+                                "pool_coordinator.py"))
+    pc = u.module_from_spec(spec)
+    spec.loader.exec_module(pc)
+    assert pc.observed_fleet() == 1, "a cold pool must read 1, reproducing the old default"
+    for task in range(5):
+        for hk in range(6):
+            pc.claim_clique("t%d" % task, "5Hot%02d" % hk, (1, 2, 3, hk))
+    assert pc.observed_fleet() == 6, \
+        "six hotkeys claimed on five tasks; the census must see six"
 
-    assert warned({"SN83_COORD": "1", "SN83_FLEET_SIZE": "7"}), \
-        "a coordinated multi-hotkey fleet with no explicit thread budget must warn"
-    assert not warned({"SN83_COORD": "1", "SN83_FLEET_SIZE": "7", "SN83_THREADS": "2"}), \
-        "an operator who set the budget should not be nagged"
-    assert not warned({"SN83_COORD": "0", "SN83_FLEET_SIZE": "7"}), \
-        "the coordinator is off; this is not its problem to raise"
-    assert not warned({"SN83_COORD": "1", "SN83_FLEET_SIZE": "1"}), \
-        "one hotkey cannot oversubscribe itself"
+

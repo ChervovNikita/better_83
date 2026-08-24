@@ -64,6 +64,60 @@ def _sweep():
 
 _pub_count = 0
 _claim_count = 0
+_fleet_cache = (0.0, 0)
+
+
+def observed_fleet(min_tasks=3, max_tasks=32, ttl_s=20.0):
+    """How many hotkeys of this operator are actually answering, counted not configured.
+
+    Replaces SN83_FLEET_SIZE. Every task directory holds one `hk.*` file per sibling that
+    claimed on that task, so the recent directories ARE a census of the fleet's answering
+    rate -- which is the quantity two things need:
+
+      * the harvest size, because a pool must hold at least one clique per sibling; and
+      * the per-solve thread budget, because each hotkey is a separate PROCESS and the
+        in-process `active` counter cannot see the others. Seven hotkeys each sizing at
+        eight threads ask one box for fifty-six.
+
+    Configuring it by hand was the previous answer and it has two failure modes an
+    observation does not: an operator who never sets it gets 1 (which silently disables
+    two mechanisms), and one who sets the REGISTERED count gets q wrong by the sampling
+    rate -- the validator queries each uid at p(difficulty), so a fleet of forty has about
+    seven answering at once, not forty.
+
+    Returns the MAX over recent tasks rather than the mean: the budget has to cover the
+    busiest round, and a task seen by only one sibling is usually one this hotkey reached
+    first, not evidence the fleet shrank. Falls back to 1 on any error or a cold start,
+    which reproduces the old default exactly.
+    """
+    global _fleet_cache
+    now = time.time()
+    if now - _fleet_cache[0] < ttl_s and _fleet_cache[1]:
+        return _fleet_cache[1]
+    best = 0
+    try:
+        names = os.listdir(ROOT)
+    except OSError:
+        return 1
+    try:
+        names.sort(key=lambda n: -os.path.getmtime(os.path.join(ROOT, n)))
+    except OSError:
+        pass
+    seen = 0
+    for name in names[:max_tasks]:
+        d = os.path.join(ROOT, name)
+        try:
+            n = sum(1 for f in os.listdir(d) if f.startswith("hk."))
+        except OSError:
+            continue
+        if n:
+            seen += 1
+            if n > best:
+                best = n
+    if seen < min_tasks or best < 1:
+        return max(1, best)
+    _fleet_cache = (now, best)
+    return best
 
 
 def publish(uuid, pool):

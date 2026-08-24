@@ -153,51 +153,55 @@ def solver_seed(hotkey, uuid):
 # the difficulty, and its operator's fleet size, so it can estimate how many siblings
 # will be queried and whether the pool covers them.
 SPREAD = int(os.environ.get("SN83_SPREAD", "0"))
-# Shared-pool coordination between an operator's own hotkeys. Off by default because it
-# assumes the hotkeys share a filesystem; a single-hotkey operator gains nothing from it.
-COORD = int(os.environ.get("SN83_COORD", "0"))
-FLEET_SIZE = int(os.environ.get("SN83_FLEET_SIZE", "1"))
+# Shared-pool coordination between an operator's own hotkeys. ON by default as of
+# 2026-08-24. It was off on the reasoning that it "assumes the hotkeys share a filesystem
+# and a single-hotkey operator gains nothing" -- both true and neither a reason to
+# default off:
+#
+#   * a lone miner's claims always succeed, so it never harvests and never spreads; its
+#     behaviour is byte-identical to the uncoordinated path. The cost is one mkdir and
+#     one O_CREAT|O_EXCL per round on tmpfs.
+#   * hotkeys on separate machines cannot see each other's claims, so every claim
+#     succeeds and the path again degrades to solving alone. No wrong answers, just no
+#     benefit.
+#   * every failure path in pool_coordinator returns None or True -- "cannot coordinate:
+#     do not block the answer" -- and the whole block below sits inside a try.
+#
+# What it is worth when the hotkeys DO share a host: +0.047/answer from deduplication
+# alone (measured to move the fleet's MEDIAN as much as its mean, +0.3216 against
+# +0.3173), plus +0.0206 from the scarce-round harvest. Left off, that is a measured
+# +0.068 per answer that nobody collects.
+COORD = int(os.environ.get("SN83_COORD", "1"))
+
+
+def fleet_size():
+    """Hotkeys of this operator actually answering, counted from the shared pool.
+
+    `SN83_FLEET_SIZE` still wins when set. Unset, this counts `hk.*` claim files across
+    recent task directories instead of defaulting to 1 -- the old default silently
+    disabled two mechanisms for every operator who did not know the variable existed.
+    """
+    v = os.environ.get("SN83_FLEET_SIZE")
+    if v:
+        try:
+            return max(1, int(v))
+        except ValueError:
+            pass
+    try:
+        return max(1, _load_sibling("pool_coordinator").observed_fleet())
+    except Exception:
+        return 1
 
 
 def _warn_thread_budget():
-    """Say something when the coordinator is on and the thread budget is left to chance.
-
-    `TOTAL_THREADS` defaults to min(8, cores) and `share = TOTAL_THREADS // active`
-    counts only THIS PROCESS's in-flight requests. Each hotkey is its own process, so N
-    hotkeys on one box each believe they own the whole budget: seven of them ask for 56
-    threads against whatever quota the box actually has.
-
-    That is true with or without the coordinator. What COORD changes is that a hotkey
-    whose clique was already claimed now HARVESTS -- more work per request, longer
-    requests, more overlap between them -- so it makes an existing oversubscription
-    worse. This project has already voided a full generation of measurements to exactly
-    this cause: 112 threads against a 15-CPU quota, where every thread is throttled and
-    the search does less work per second of a wall-clock-bounded budget.
-
-    Divide by the number CONCURRENTLY QUERIED, not the number registered. The validator
-    samples each uid independently at p(difficulty), so a fleet of N has about
-    `N * p` answering at once -- roughly 7 of 40 at difficulty 0.8. `cores / q` is about
-    2 on a 15-core box and is what every measurement in research/ was taken at.
+    """Kept as a no-op hook. The condition it warned about -- COORD on with the thread
+    budget left to chance -- no longer exists: `share` now divides by `observed_fleet()`,
+    so the fleet sizes its own budget from the pool's claim files. Telling the operator
+    to export SN83_THREADS was the wrong fix for a number the code can measure.
     """
-    if not (COORD and FLEET_SIZE > 1):
-        return
-    if os.environ.get("SN83_THREADS"):
-        return
-    msg = ("SN83_COORD=1 with SN83_FLEET_SIZE=%d but SN83_THREADS is unset. Each hotkey "
-           "is a separate process and each will size its solver at %d threads, so the "
-           "fleet may ask this box for %d. Set SN83_THREADS to cores divided by the "
-           "number of hotkeys ANSWERING AT ONCE (about fleet_size * p(difficulty), so "
-           "~2 for a 7-hotkey fleet on 15 cores). Oversubscription does not error -- it "
-           "throttles every thread and quietly costs reward."
-           % (FLEET_SIZE, TOTAL_THREADS, TOTAL_THREADS * FLEET_SIZE))
-    try:
-        import bittensor as bt
-        bt.logging.warning(msg)
-    except Exception:
-        print(msg, file=sys.stderr)
+    return
 
 
-_warn_thread_budget()
 
 
 def difficulty_from_n(number_of_nodes):
@@ -336,7 +340,19 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
         global _active
         with _active_lock:
             _active += 1
-            share = max(1, TOTAL_THREADS // _active)
+            in_process = _active
+        # Divide by the number of solves running across the FLEET, not just inside this
+        # process. Each hotkey is its own process, so `_active` cannot see the others:
+        # seven hotkeys each sizing at min(8, cores) ask one box for fifty-six threads.
+        # Nothing errors -- every thread is throttled and the search does less work per
+        # second of a wall-clock-bounded budget, which is how this project once voided a
+        # whole generation of measurements at 112 threads against a 15-CPU quota.
+        #
+        # The pool's claim files are the census: `observed_fleet()` counts hotkeys that
+        # actually answered recent tasks, which is fleet_size * p(difficulty) -- the
+        # number CONCURRENTLY QUERIED, not the number registered. A lone miner or a cold
+        # start reads 1 and this reduces to the old expression exactly.
+        share = max(1, TOTAL_THREADS // max(in_process, fleet_size()))
         try:
             if COORD and hotkey is not None and uuid is not None:
                 # Coordinated path: solve independently, deduplicate the results.
@@ -615,11 +631,11 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                 # Harvest a pool rather than a single clique, then decide locally.
                 # solve_many keeps maximal sub-omega cliques as spares (SN83_BACKFILL).
                 from fleet_solver import solve_many
-                want = max(2, FLEET_SIZE)
+                want = max(2, fleet_size())
                 pool = solve_many(A, budget, want, seed=seed, threads=share)
                 pick = _spread_pick([tuple(c) for c in pool], hotkey, uuid,
                                     difficulty if difficulty is not None else 0.8,
-                                    FLEET_SIZE)
+                                    fleet_size())
                 clique = list(pick) if pick else solve_one(A, budget, seed=seed,
                                                            threads=share)
             else:
