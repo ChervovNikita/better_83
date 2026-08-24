@@ -387,23 +387,36 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                     # (10.7 distinct against ban's 25.6). The rule and the search are one
                     # mechanism, which is why the flag switches both.
                     #
-                    # Gated on this hotkey's own distinct maximum count.
+                    # Gated on this hotkey's own distinct maximum count, MEASURED
+                    # (G83, 100 rounds at 25 per band, on a delete-and-resolve harvest so
+                    # the cut is priced on top of the harvest instead of confounded with
+                    # it):
                     #
-                    # THE DEFAULT OF 3 IS PROBABLY TOO HIGH. Fleet-wide the statistic runs
-                    # 1.0 / 2.5 / 3.3 / 29.6 across the four bands (G74), an order of
-                    # magnitude between scarce and rich, and 3 was scaled from that by
-                    # guesswork. One hotkey's own pool does NOT inherit that separation:
-                    # G83's smoke found a band-8+ round where 50% of hotkeys fired at
-                    # C=3 and 100% at C=4, because a single harvest holds only three or
-                    # four maxima there while the fleet's union holds thirty. At C=2 that
-                    # round fired 0% and band 1 still fired 100%.
+                    #   cut   vs shipped   fires on band 8+   sign test
+                    #    1      +0.0048          7%           41 better /  9 worse of 50
+                    #    2      +0.0048          9%           47 better / 17 worse of 64
+                    #    3      +0.0016         11%           53 better / 20 worse of 73
+                    #    4      -0.0117         14%
+                    #    6      -0.0401         22%
+                    #    8      -0.0814         31%
                     #
-                    # So the separating cut looks like 1 or 2, not 3. G83 is measuring it
-                    # over 100 rounds; until it lands, do not raise SN83_SCARCE_MAX_ND and
-                    # do not enable SN83_SCARCE_SPREAD in production. The rule costs -0.56
-                    # when it fires on a rich round, which is why this flag ships off.
+                    # The per-hotkey count separates the bands 1.3 / 1.6 / 2.8 / 8.3, so a
+                    # low cut fires on nearly every scarce hotkey (97% on band 1) and
+                    # seldom on a rich one. It is never zero on band 8+ though, and the
+                    # rule costs -0.56 there, which is what eats the gain and turns the
+                    # curve over so sharply above 2.
+                    #
+                    # **2, not 3.** The first default was scaled by guesswork off G74's
+                    # FLEET-WIDE count. It measures +0.0016 -- a third of 2's +0.0048 and
+                    # under the +0.003 bar this project ships on.
+                    #
+                    # KEEP THIS IN PROPORTION. The cut is worth +0.0048. The delete-and-
+                    # resolve harvest that this same flag switches is worth roughly +0.024
+                    # to +0.030 (G82's arms split by G83's missing cell). **The harvest is
+                    # the mechanism and the forced spread is a small addition on top of
+                    # it**, which is the reverse of how this block was first written up.
                     if _scarce and len(ordered) <= int(
-                            os.environ.get("SN83_SCARCE_MAX_ND", "3")):
+                            os.environ.get("SN83_SCARCE_MAX_ND", "2")):
                         for cand in sorted((c for c in mine if len(c) == mmax - 1),
                                            key=len, reverse=True):
                             if pcoord.claim_clique(uuid, hotkey, cand):
