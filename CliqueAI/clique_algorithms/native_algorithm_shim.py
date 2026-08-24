@@ -496,7 +496,29 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                     # it**, which is the reverse of how this block was first written up.
                     if _scarce and len(ordered) <= int(
                             os.environ.get("SN83_SCARCE_MAX_ND", "2")):
-                        for cand in sorted((c for c in mine if len(c) == mmax - 1),
+                        # FILTER FOR MAXIMALITY. Delete-and-resolve runs the solver on a
+                        # graph with vertices removed, so its answer is maximal in the
+                        # REDUCED graph and may be extendable once those vertices are
+                        # back. Measured 2026-08-24: 8% of ban-mode pool entries fail
+                        # `_is_valid_maximal_clique`, concentrated in exactly the
+                        # omega-1 spares this rule picks (every failure was size 50 with
+                        # omega 51, "extendable by v").
+                        #
+                        # The validator tests maximality, so an unfiltered spare is
+                        # rejected and the miner falls back to the upstream
+                        # approximation at a cost of ~0.73 per answer -- turning a
+                        # +0.02 mechanism into a large loss on the rounds it fires.
+                        # Found by benchmarking the DEPLOYED path; the research harness
+                        # scores from sizes and never checks maximality, so every
+                        # ban-mode measurement missed it.
+                        #
+                        # Filtering rather than extending: re-extending an omega-1 spare
+                        # tends to add back the vertex that was deleted, reproducing the
+                        # omega clique the rule was avoiding. A spare that is genuinely
+                        # maximal at omega-1 is the thing the rule wants; the rest fall
+                        # through to the normal claim below.
+                        for cand in sorted((c for c in mine if len(c) == mmax - 1
+                                            and _is_valid_maximal_clique(A, list(c))),
                                            key=len, reverse=True):
                             if pcoord.claim_clique(uuid, hotkey, cand):
                                 chosen = cand
