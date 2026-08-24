@@ -430,7 +430,22 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                                     picked = cand
                                     break
                             else:
-                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "4"))
+                                # 6, not 4. Swept 2/4/6/inf on 80 population-
+                                # proportional rounds (G54): weighted +0.0289 / +0.0445 /
+                                # +0.0662 / +0.0662, with 6 beating the old 4 on 21 of 28
+                                # changed rounds, p=0.013. The 4 was the first value
+                                # tried and cost roughly a third of the mechanism.
+                                #
+                                # 6 and infinity are IDENTICAL at the seven-hotkey fleet
+                                # the sweep used, because a claim count of 7 means every
+                                # hotkey holds a distinct clique and none is displaced.
+                                # They are NOT identical at larger fleets: a 40-hotkey
+                                # fleet at difficulty 0.8 has about 14 answering, where 6
+                                # still brakes. That brake is untested and kept
+                                # deliberately -- more claimants on a rich round is
+                                # exactly the state where an omega-1 answer is taxed
+                                # hardest.
+                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "6"))
                                 if agree <= pthr:
                                     for cand in spares:
                                         if len(cand) == mmax - 1 and \
