@@ -381,11 +381,21 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                     # (10.7 distinct against ban's 25.6). The rule and the search are one
                     # mechanism, which is why the flag switches both.
                     #
-                    # Gated on this hotkey's own distinct maximum count. Fleet-wide that
-                    # statistic runs 1.0 / 2.5 / 3.3 / 29.6 across the four bands (G74),
-                    # an order of magnitude between scarce and rich; per-hotkey it is
-                    # smaller, hence the default of 3 rather than 8. The rule MUST NOT
-                    # fire on rich rounds -- there it costs -0.56.
+                    # Gated on this hotkey's own distinct maximum count.
+                    #
+                    # THE DEFAULT OF 3 IS PROBABLY TOO HIGH. Fleet-wide the statistic runs
+                    # 1.0 / 2.5 / 3.3 / 29.6 across the four bands (G74), an order of
+                    # magnitude between scarce and rich, and 3 was scaled from that by
+                    # guesswork. One hotkey's own pool does NOT inherit that separation:
+                    # G83's smoke found a band-8+ round where 50% of hotkeys fired at
+                    # C=3 and 100% at C=4, because a single harvest holds only three or
+                    # four maxima there while the fleet's union holds thirty. At C=2 that
+                    # round fired 0% and band 1 still fired 100%.
+                    #
+                    # So the separating cut looks like 1 or 2, not 3. G83 is measuring it
+                    # over 100 rounds; until it lands, do not raise SN83_SCARCE_MAX_ND and
+                    # do not enable SN83_SCARCE_SPREAD in production. The rule costs -0.56
+                    # when it fires on a rich round, which is why this flag ships off.
                     if _scarce and len(ordered) <= int(
                             os.environ.get("SN83_SCARCE_MAX_ND", "3")):
                         for cand in sorted((c for c in mine if len(c) == mmax - 1),

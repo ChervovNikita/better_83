@@ -161,9 +161,13 @@ def test_scarce_spread_is_off_by_default_and_switches_both_halves():
     src = open(SHIM).read()
     assert 'os.environ.get("SN83_SCARCE_SPREAD", "0")' in src, \
         "SN83_SCARCE_SPREAD must default to 0; it is measured on scarce rounds only"
-    # exactly one read of the flag, held in _scarce, used by both halves
-    assert src.count('SN83_SCARCE_SPREAD') == 1, \
-        "the flag is read once into _scarce so the harvest and the rule cannot diverge"
+    # Exactly one READ of the flag, held in _scarce, used by both halves. Count the
+    # environment lookup, not the bare name -- the first version counted the name and
+    # went red when a comment mentioned the flag, which is a false positive on the thing
+    # it exists to protect.
+    assert src.count('os.environ.get("SN83_SCARCE_SPREAD"') == 1, \
+        "the flag must be read exactly once, into _scarce, so the harvest and the rule " \
+        "cannot diverge; a second read is how they drift apart"
     assert 'pool_mode="ban" if _scarce else None' in src, \
         "with the flag on, the harvest must run in delete-and-resolve mode"
     assert 'if _scarce and len(ordered) <= int(' in src, \
