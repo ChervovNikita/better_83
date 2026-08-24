@@ -113,3 +113,36 @@ def test_solve_many_accepts_and_forwards_a_thread_budget():
         "solve_many call site(s) in the shim do not forward a thread budget, so their "
         "internal solves run at the library default against a 15-core quota: %s"
         % missing)
+
+
+def test_the_coordinator_is_off_unless_three_variables_are_exported():
+    """DORMANT MECHANISM, found 2026-08-24 by auditing the deployed path rather than the
+    research harness. `COORD = int(os.environ.get("SN83_COORD", "0"))` and that one flag
+    guards the WHOLE coordinator block -- the lazy harvest, the claim dedup, the
+    agreement gate, and the partial spread with SN83_PARTIAL_THR inside it. Measured at
+    +0.0725/answer at seven hotkeys and +0.0486 at fourteen, and nothing in the repo,
+    start_miner.sh, .env or the shell sets it, so none of it has ever run in deployment.
+
+    This test cannot make the operator export the variables. It makes the requirement
+    executable, so a reader who changes the default -- in either direction -- has to come
+    here and say so."""
+    src = open(SHIM).read()
+    assert 'os.environ.get("SN83_COORD", "0")' in src, \
+        "SN83_COORD no longer defaults to 0; update RESULTS.md step 5b, which tells the " \
+        "operator the coordinator is dead code until they export it"
+    assert 'os.environ.get("SN83_FLEET_SIZE", "1")' in src, \
+        "SN83_FLEET_SIZE no longer defaults to 1; see the FLEET_SIZE=1 test above"
+    # The guard must be a single `if COORD and ...` -- if the block is ever split so that
+    # part of it runs without COORD, the activation instructions become wrong.
+    guards = [ln.strip() for ln in src.splitlines() if "if COORD" in ln]
+    assert guards == ["if COORD and hotkey is not None and uuid is not None:"], \
+        "the coordinator's entry guard changed; RESULTS.md documents exactly one: %s" % guards
+
+    # And nothing in the repo turns it on, which is the actual finding.
+    import subprocess
+    hits = subprocess.run(
+        ["git", "grep", "-l", "SN83_COORD", "--", ".", ":!research", ":!tests"],
+        cwd=ROOT, capture_output=True, text=True).stdout.split()
+    assert hits == ["CliqueAI/clique_algorithms/native_algorithm_shim.py"], \
+        "something outside research/ and tests/ now mentions SN83_COORD -- if a launcher " \
+        "sets it, RESULTS.md step 5b should stop saying nothing does: %s" % hits
