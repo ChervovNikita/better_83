@@ -149,9 +149,10 @@ def test_the_coordinator_is_off_unless_three_variables_are_exported():
 
 
 def test_scarce_spread_is_off_by_default_and_switches_both_halves():
-    """G82's scarce-round spread is worth +0.0297 over the shipped policy on the 17.4% of
-    rounds that are scarce (95 better / 5 worse of 100). It is OFF by default because it
-    is measured only on bands 1 and 2-3 and costs -0.56 if it fires on band 8+.
+    """G82's scarce-round spread. ON by default as of G92, which measured it at +0.0206 per
+    answer on the LAZY harvest path -- the one this shim takes -- at 43 better / 23 worse of
+    66 changed rounds. G88 measured the same arms with every hotkey harvesting and got
+    +0.0004; that configuration does not exist in deployment.
 
     The property that matters is that SN83_SCARCE_SPREAD switches BOTH halves. The rule
     alone, on the ordinary plateau-walk harvest, scored -0.2019 on band 1 against the
@@ -159,8 +160,11 @@ def test_scarce_spread_is_off_by_default_and_switches_both_halves():
     rule on different flags, or lets one default on without the other, the result is a
     regression that looks like an improvement in the diff."""
     src = open(SHIM).read()
-    assert 'os.environ.get("SN83_SCARCE_SPREAD", "0")' in src, \
-        "SN83_SCARCE_SPREAD must default to 0; it is measured on scarce rounds only"
+    assert 'os.environ.get("SN83_SCARCE_SPREAD", "1")' in src, \
+        "SN83_SCARCE_SPREAD defaults to 1 as of G92 (+0.0206 measured on the LAZY path, " \
+        "the one this shim takes). It is inert unless SN83_COORD=1. If you turn it back " \
+        "off, say which measurement says so -- G88's +0.0004 was the EAGER path and does " \
+        "not describe deployment."
     # Exactly one READ of the flag, held in _scarce, used by both halves. Count the
     # environment lookup, not the bare name -- the first version counted the name and
     # went red when a comment mentioned the flag, which is a false positive on the thing

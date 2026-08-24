@@ -347,7 +347,18 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                 # so carrying it on rich rounds costs about -0.005, against +0.0297 on
                 # the scarce ones. `pool_mode` is passed rather than set in the
                 # environment because requests are served on threads.
-                _scarce = int(os.environ.get("SN83_SCARCE_SPREAD", "0"))
+                # ON by default as of G92. It was 0 while the evidence said +0.0004 (G88); G92 re-ran
+                # the same rounds with the LAZY harvest -- the path this shim actually takes --
+                # and measured **+0.0206**, 43 better / 23 worse of 66 changed rounds, p = 0.019.
+                # G88 gave every hotkey a pool, which makes the scarce-round rule fire on rich
+                # rounds; here a hotkey harvests only when a sibling already claimed its first
+                # solve, which is 5.7 of 7 hotkeys on a scarce round and 0.7 of 7 on a rich one.
+                # So the rule reaches the rounds it helps and mostly misses the ones it hurts,
+                # and band 8+ comes out POSITIVE (+0.0059) instead of -0.0437.
+                #
+                # Inert unless SN83_COORD=1: this whole block is behind that flag, so a default
+                # of 1 changes nothing for anyone who has not opted into the coordinator.
+                _scarce = int(os.environ.get("SN83_SCARCE_SPREAD", "1"))
                 mine = [] if clique is not None else [
                     tuple(sorted(int(v) for v in c))
                     for c in solve_many(A, max(0.5, deadline - time.monotonic()),
