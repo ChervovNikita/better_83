@@ -187,3 +187,46 @@ def test_scarce_spread_is_off_by_default_and_switches_both_halves():
     assert "pool_mode" in inspect.signature(fleet_solver.solve_many).parameters, \
         "solve_many must accept pool_mode; the environment is process-global and " \
         "requests are served on threads, so SN83_POOL cannot be set around one harvest"
+
+
+def test_coord_without_an_explicit_thread_budget_warns():
+    """The oversubscription this project has already been burned by, one layer up.
+
+    `TOTAL_THREADS` defaults to min(8, cores) and `share = TOTAL_THREADS // active`
+    counts only this PROCESS's in-flight requests, while each hotkey is its own process.
+    Seven hotkeys therefore ask one box for 56 threads. That is true with or without the
+    coordinator; what COORD changes is that a displaced hotkey now harvests, making
+    requests longer and overlap likelier, so it makes an existing problem worse.
+
+    A whole generation of measurements was voided by exactly this (112 threads against a
+    15-CPU quota). It does not error -- every thread is throttled and the search does
+    less work per second of a wall-clock budget -- so nothing surfaces it but a warning."""
+    src = open(SHIM).read()
+    assert "def _warn_thread_budget()" in src, \
+        "the coordinator must say something when the thread budget is left to chance"
+    assert "_warn_thread_budget()" in src.split("def _warn_thread_budget()")[1], \
+        "the warning is defined but never called"
+
+    import subprocess
+    def warned(env):
+        e = dict(os.environ)
+        e.pop("SN83_THREADS", None)
+        e.update(env)
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import importlib.util as u,sys;"
+             "sys.path.insert(0,%r);sys.path.insert(0,%r);"
+             "sp=u.spec_from_file_location('s',%r);"
+             "m=u.module_from_spec(sp);sp.loader.exec_module(m)"
+             % (ROOT, os.path.join(ROOT, "research"), SHIM)],
+            capture_output=True, text=True, env=e)
+        return "SN83_THREADS is unset" in (out.stdout + out.stderr)
+
+    assert warned({"SN83_COORD": "1", "SN83_FLEET_SIZE": "7"}), \
+        "a coordinated multi-hotkey fleet with no explicit thread budget must warn"
+    assert not warned({"SN83_COORD": "1", "SN83_FLEET_SIZE": "7", "SN83_THREADS": "2"}), \
+        "an operator who set the budget should not be nagged"
+    assert not warned({"SN83_COORD": "0", "SN83_FLEET_SIZE": "7"}), \
+        "the coordinator is off; this is not its problem to raise"
+    assert not warned({"SN83_COORD": "1", "SN83_FLEET_SIZE": "1"}), \
+        "one hotkey cannot oversubscribe itself"

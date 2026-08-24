@@ -159,6 +159,47 @@ COORD = int(os.environ.get("SN83_COORD", "0"))
 FLEET_SIZE = int(os.environ.get("SN83_FLEET_SIZE", "1"))
 
 
+def _warn_thread_budget():
+    """Say something when the coordinator is on and the thread budget is left to chance.
+
+    `TOTAL_THREADS` defaults to min(8, cores) and `share = TOTAL_THREADS // active`
+    counts only THIS PROCESS's in-flight requests. Each hotkey is its own process, so N
+    hotkeys on one box each believe they own the whole budget: seven of them ask for 56
+    threads against whatever quota the box actually has.
+
+    That is true with or without the coordinator. What COORD changes is that a hotkey
+    whose clique was already claimed now HARVESTS -- more work per request, longer
+    requests, more overlap between them -- so it makes an existing oversubscription
+    worse. This project has already voided a full generation of measurements to exactly
+    this cause: 112 threads against a 15-CPU quota, where every thread is throttled and
+    the search does less work per second of a wall-clock-bounded budget.
+
+    Divide by the number CONCURRENTLY QUERIED, not the number registered. The validator
+    samples each uid independently at p(difficulty), so a fleet of N has about
+    `N * p` answering at once -- roughly 7 of 40 at difficulty 0.8. `cores / q` is about
+    2 on a 15-core box and is what every measurement in research/ was taken at.
+    """
+    if not (COORD and FLEET_SIZE > 1):
+        return
+    if os.environ.get("SN83_THREADS"):
+        return
+    msg = ("SN83_COORD=1 with SN83_FLEET_SIZE=%d but SN83_THREADS is unset. Each hotkey "
+           "is a separate process and each will size its solver at %d threads, so the "
+           "fleet may ask this box for %d. Set SN83_THREADS to cores divided by the "
+           "number of hotkeys ANSWERING AT ONCE (about fleet_size * p(difficulty), so "
+           "~2 for a 7-hotkey fleet on 15 cores). Oversubscription does not error -- it "
+           "throttles every thread and quietly costs reward."
+           % (FLEET_SIZE, TOTAL_THREADS, TOTAL_THREADS * FLEET_SIZE))
+    try:
+        import bittensor as bt
+        bt.logging.warning(msg)
+    except Exception:
+        print(msg, file=sys.stderr)
+
+
+_warn_thread_budget()
+
+
 def difficulty_from_n(number_of_nodes):
     """Recover the task difficulty from the vertex count.
 
