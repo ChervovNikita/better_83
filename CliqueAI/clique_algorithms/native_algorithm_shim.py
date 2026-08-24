@@ -375,7 +375,24 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                         # distinct/claimants separates the two: a converged fleet at 4
                         # claimants shows 1 distinct (0.25), a still-exploring one shows
                         # 2 (0.50).
-                        ratio = float(os.environ.get("SN83_AGREE_RATIO", "0.34"))
+                        # 0.50, not 0.34. Measured 2026-08-24 (G37, 62 rounds,
+                        # sequential arrival, deployment-weighted): 0.34 is worth
+                        # +0.0151 against no gate and 0.50 is worth +0.0294 -- nearly
+                        # double -- with 31 better / 6 worse of 37 changed rounds,
+                        # p = 4.1e-05, and the 8+ band unchanged (-0.1138 vs -0.1140).
+                        #
+                        # 0.34 also makes SN83_AGREE_MIN_CLAIMANTS dead code: a second
+                        # arrival sees distinct/claimants = 1/2 = 0.50, which already
+                        # exceeds 0.34, so the gate cannot act before the third claimant
+                        # whatever the minimum says. At 0.50 the second arrival can fire
+                        # when it agrees with the first, which is where the extra value
+                        # comes from -- on a scarce round the old rule spent three of
+                        # seven slots before the sensor existed.
+                        #
+                        # 0.67 was measured too and loses: it starts firing on rounds
+                        # holding eight or more maxima, where the crossover has turned,
+                        # taking that band from -0.1138 to -0.1328.
+                        ratio = float(os.environ.get("SN83_AGREE_RATIO", "0.50"))
                         picked = None
                         # Require enough claimants for "few distinct" to mean
                         # convergence rather than earliness. Without the denominator the
