@@ -40,15 +40,23 @@ def _extend_to_maximal(A, members, rng):
     return sorted(np.flatnonzero(inC).tolist())
 
 
-def solve_many(A, time_limit, k, seed=0):
+def solve_many(A, time_limit, k, seed=0, threads=None):
     """Default: native champion, then a plateau walk for alternates."""
     from fastsolver import solve as solve_one
 
     t0 = time.time()
     share = float(os.environ.get("SN83_CHAMPION_SHARE", "0.75"))
-    _th = os.environ.get("SN83_SOLVE_THREADS")
-    best = (solve_one(A, time_limit * share, seed=seed, threads=int(_th))
-            if _th else solve_one(A, time_limit * share, seed=seed))
+    # Thread budget. The shim computes `share = TOTAL_THREADS // active` so that N
+    # concurrent requests never ask the box for more than the container quota, then
+    # passes it to solve_one on the direct path. solve_many used to ignore it entirely
+    # and its internal solves ran at the library default -- the same "128 threads for
+    # 15 cores" defect, reintroduced one level down. Every solve below uses `nthreads`.
+    if threads is None:
+        _th = os.environ.get("SN83_SOLVE_THREADS")
+        threads = int(_th) if _th else None
+    nthreads = threads
+    best = (solve_one(A, time_limit * share, seed=seed, threads=nthreads)
+            if nthreads else solve_one(A, time_limit * share, seed=seed))
     out = [sorted(int(v) for v in best)]
     if k <= 1:
         return out
@@ -110,8 +118,10 @@ def solve_many(A, time_limit, k, seed=0):
             left = deadline - time.time()
             if left < 0.2:
                 break
-            cand = solve_one(B, min(left, time_limit * frac),
-                             seed=int(rng.integers(1 << 30)))
+            _bt = min(left, time_limit * frac)
+            _sd = int(rng.integers(1 << 30))
+            cand = (solve_one(B, _bt, seed=_sd, threads=nthreads)
+                    if nthreads else solve_one(B, _bt, seed=_sd))
             cand = tuple(sorted(int(v) for v in cand))
             if not cand:
                 continue

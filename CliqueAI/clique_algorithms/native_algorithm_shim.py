@@ -342,7 +342,7 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                     tuple(sorted(int(v) for v in c))
                     for c in solve_many(A, max(0.5, deadline - time.monotonic()),
                                         int(os.environ.get("SN83_HARVEST_N", "10")),
-                                        seed=seed)]
+                                        seed=seed, threads=share)]
                 if mine:
                     mmax = max(len(c) for c in mine)
                     ordered = [c for c in mine if len(c) == mmax]
@@ -397,7 +397,7 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                 # solve_many keeps maximal sub-omega cliques as spares (SN83_BACKFILL).
                 from fleet_solver import solve_many
                 want = max(2, FLEET_SIZE)
-                pool = solve_many(A, budget, want, seed=seed)
+                pool = solve_many(A, budget, want, seed=seed, threads=share)
                 pick = _spread_pick([tuple(c) for c in pool], hotkey, uuid,
                                     difficulty if difficulty is not None else 0.8,
                                     FLEET_SIZE)
