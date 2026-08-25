@@ -167,10 +167,16 @@ SPREAD = int(os.environ.get("SN83_SPREAD", "0"))
 #   * every failure path in pool_coordinator returns None or True -- "cannot coordinate:
 #     do not block the answer" -- and the whole block below sits inside a try.
 #
-# What it is worth when the hotkeys DO share a host: +0.047/answer from deduplication
-# alone (measured to move the fleet's MEDIAN as much as its mean, +0.3216 against
-# +0.3173), plus +0.0206 from the scarce-round harvest. Left off, that is a measured
-# +0.068 per answer that nobody collects.
+# What it is worth when the hotkeys DO share a host: **+0.0598 per answer**,
+# deployment-weighted, measured 2026-08-24 by SHIMBENCH -- this file's own entry point,
+# 100 rounds, Q=7 hotkeys sharing a pool directory, NO SN83_* variables set, 0 invalid
+# answers of 1400, 65 better / 24 worse of 89 changed rounds, p = 1.6e-05.
+#
+# That supersedes the "+0.047 dedup plus +0.0206 scarce = +0.068" this comment used to
+# carry. The +0.047 still stands -- it was measured on the ctl path, which was scored
+# validly -- but the +0.0206 is retracted (see the RETRACTION banner further down), so
+# the sum was not a sum of two valid numbers. SHIMBENCH prices the bundle end to end and
+# needs no split.
 COORD = int(os.environ.get("SN83_COORD", "1"))
 
 
@@ -406,7 +412,9 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                                           solve_one(A, _t, seed=seed, threads=share)))
                     if _first and pcoord.claim_clique(uuid, hotkey, _first):
                         clique = list(_first)
-                # SCARCE-ROUND SPREAD (G82). Off by default; see the block below the
+                # SCARCE-ROUND SPREAD (G82). ON by default -- this said "off" for a day
+                # after the default flipped, while the comment nine lines down said "ON
+                # by default as of G92". See the block below the
                 # claim loop for what it does and what it is worth. The harvest mode has
                 # to be decided BEFORE the harvest, and the detector it would use is a
                 # property OF the harvest, so when the rule is enabled the harvest always
@@ -466,7 +474,28 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                     # (10.7 distinct against ban's 25.6). The rule and the search are one
                     # mechanism, which is why the flag switches both.
                     #
-                    # Gated on this hotkey's own distinct maximum count, MEASURED
+                    # ================= RETRACTION, 2026-08-25 =================
+                    # EVERY number in the table below, and G82's +0.0703 and G92's
+                    # +0.0206 quoted above, comes from a harness that called
+                    # round_score.score() WITHOUT the `valid=` argument. It therefore
+                    # credited delete-and-resolve cliques that the validator REJECTS:
+                    # they are maximal in the reduced graph and extendable in the full
+                    # one, and 8% of ban-mode pool entries and 27% of omega-1 spares
+                    # fail that test.
+                    #
+                    # The bias is not random. A higher cut spreads on more rounds and so
+                    # absorbs more invalid spares, which pushed the table's curve DOWN at
+                    # high cuts. The cut of 2 is the conservative survivor of a broken
+                    # measurement.
+                    #
+                    # Numbers that stand: SHIMBENCH's +0.0598 for the whole bundle on
+                    # this file's own entry point, 0 invalid of 1400; and anything
+                    # measured on the ctl path, which was never in ban mode.
+                    #
+                    # Read the table as history, not as evidence.
+                    # ==========================================================
+                    #
+                    # Gated on this hotkey's own distinct maximum count, measured
                     # (G83, 100 rounds at 25 per band, on a delete-and-resolve harvest so
                     # the cut is priced on top of the harvest instead of confounded with
                     # it):
