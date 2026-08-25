@@ -494,6 +494,21 @@ def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
                     # to +0.030 (G82's arms split by G83's missing cell). **The harvest is
                     # the mechanism and the forced spread is a small addition on top of
                     # it**, which is the reverse of how this block was first written up.
+                    # RETRACTED 2026-08-25 -- read the two paragraphs above with this.
+                    # The +0.0048 and +0.0016 both come from G83, one of the runs scored
+                    # WITHOUT the validator's maximality test, so every ban-mode arm was
+                    # credited for cliques the validator rejects. The bias ran against
+                    # high cuts, because a high cut spreads on more rounds and so eats
+                    # more of the invalid spares. The cut of 2 is therefore the
+                    # CONSERVATIVE choice, not the measured optimum, and it stands only
+                    # until G102 re-derives it through fleet_sim.
+                    #
+                    # Field-log decomposition, 2026-08-25: an omega-1 answer outscores an
+                    # omega one on every band up to nd<=7 (+0.2823 / +0.2416 / +0.1241),
+                    # and only reverses at 8+ (-0.4151). If that survives the simulator
+                    # the optimum cut is near 7 and this line is leaving ~+0.014 on the
+                    # table. Do not hand-edit it to 7 on the strength of that -- it is a
+                    # prediction from the field's answers, not from ours.
                     if _scarce and len(ordered) <= int(
                             os.environ.get("SN83_SCARCE_MAX_ND", "2")):
                         # FILTER FOR MAXIMALITY. Delete-and-resolve runs the solver on a
