@@ -141,11 +141,21 @@ def test_the_coordinator_ships_on_and_degrades_to_the_old_path_alone():
         "the coordinated path needs claim_clique to exist for its lone-miner fallback"
 
 
-def test_scarce_spread_is_off_by_default_and_switches_both_halves():
-    """G82's scarce-round spread. ON by default as of G92, which measured it at +0.0206 per
-    answer on the LAZY harvest path -- the one this shim takes -- at 43 better / 23 worse of
-    66 changed rounds. G88 measured the same arms with every hotkey harvesting and got
-    +0.0004; that configuration does not exist in deployment.
+def test_scarce_spread_is_ON_by_default_and_switches_both_halves():
+    """G82's scarce-round spread, ON by default.
+
+    RETRACTED 2026-08-25: the +0.0206 this test used to cite is G92's, and G92 scored
+    ban-mode arms without the validator's maximality test, so it credited cliques the
+    validator rejects. So is G82's +0.0703. Neither number describes the shipped code.
+
+    What supports the default now is SHIMBENCH: the DEPLOYED path, 100 rounds, no SN83_*
+    variables set, **0 invalid of 1400 answers**, +0.0598 deployment-weighted with this
+    flag on. That prices the whole coordinator as one bundle -- the scarce spread's own
+    share of it has NOT been re-measured validated, and this docstring should not pretend
+    otherwise. G102 is armed to re-derive the cut.
+
+    The old name said "off by default" and was left in place for a day after the default
+    flipped to 1, asserting the opposite of what its own body checks.
 
     The property that matters is that SN83_SCARCE_SPREAD switches BOTH halves. The rule
     alone, on the ordinary plateau-walk harvest, scored -0.2019 on band 1 against the
@@ -154,10 +164,10 @@ def test_scarce_spread_is_off_by_default_and_switches_both_halves():
     regression that looks like an improvement in the diff."""
     src = open(SHIM).read()
     assert 'os.environ.get("SN83_SCARCE_SPREAD", "1")' in src, \
-        "SN83_SCARCE_SPREAD defaults to 1 as of G92 (+0.0206 measured on the LAZY path, " \
-        "the one this shim takes). It is inert unless SN83_COORD=1. If you turn it back " \
-        "off, say which measurement says so -- G88's +0.0004 was the EAGER path and does " \
-        "not describe deployment."
+        "SN83_SCARCE_SPREAD defaults to 1. It is inert unless SN83_COORD=1. If you turn " \
+        "it back off, say which VALIDATED measurement says so -- G92's +0.0206 and G88's " \
+        "+0.0004 were both scored without the maximality test and are retracted; the " \
+        "standing number is SHIMBENCH's +0.0598 for the bundle, 0 invalid of 1400."
     # Exactly one READ of the flag, held in _scarce, used by both halves. Count the
     # environment lookup, not the bare name -- the first version counted the name and
     # went red when a comment mentioned the flag, which is a false positive on the thing
