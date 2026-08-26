@@ -76,7 +76,11 @@ def last_stats():
 
 
 def solve_many(adjacency_matrix, time_limit, k):
-    """Returns up to k distinct maximal cliques, largest first."""
+    """Returns a pool for the picker: up to k omega-cliques, then up to k spares.
+
+    Not k cliques in total. The picker chooses q of these, and it needs enough
+    spares to be able to decline omega entirely.
+    """
     assert k > 0
     assert time_limit > 0
     A = np.ascontiguousarray(adjacency_matrix, dtype=np.uint8)
@@ -115,10 +119,16 @@ def solve_many(adjacency_matrix, time_limit, k):
     # Exact re-check: a 64-bit fingerprint collision must cost a lost clique,
     # never an invalid answer. Only what is actually returned is checked --
     # verifying a full 1024-slot pool costs 0.1s of a 0.15s reserve.
+    # Up to k of EACH class, not k in total. The picker needs k distinct spares
+    # available to be able to decline omega at all; returning k cliques in total
+    # left it with only k - P spares, so it backfilled with the very omega
+    # cliques it was trying to decline and could never reach zero.
     seen = set()
     out = []
     spare = []
     for clique in pool:
+        if len(out) >= k and len(spare) >= k:
+            break
         key = tuple(sorted(clique))
         if key in seen:
             continue
@@ -127,11 +137,10 @@ def solve_many(adjacency_matrix, time_limit, k):
             continue
         seen.add(key)
         if not out or len(key) == len(out[0]):
-            out.append(key)
-        elif len(key) >= len(out[0]) - SPARE_MARGIN:
+            if len(out) < k:
+                out.append(key)
+        elif len(key) >= len(out[0]) - SPARE_MARGIN and len(spare) < k:
             spare.append(key)
-        if len(out) >= k:
-            break
     assert out, "harvest returned %d cliques, none valid" % len(pool)
 
     target = len(out[0])
@@ -149,5 +158,4 @@ def solve_many(adjacency_matrix, time_limit, k):
                          % (target, len(out), len(spare), counters["jobs"],
                             _last_stats["stall"]))
 
-    out.extend(spare)
-    return out[:k]
+    return out + spare

@@ -49,6 +49,25 @@ def main():
 
     from CliqueAI.graph.codec import GraphCodec
     from CliqueAI.scoring.clique_scoring import CliqueScoreCalculator
+
+    class Memo(CliqueScoreCalculator):
+        """The validator's calculator with validity memoised per round.
+
+        is_valid_maximum_clique is O(n*k) and the base class calls it inside both
+        optimality() and diversity(), for every arm -- so the field's answers get
+        revalidated 8x a round. The logic is inherited untouched; only repeat
+        work is skipped.
+        """
+
+        cache = {}
+
+        def is_valid_maximum_clique(self, nodes):
+            key = tuple(sorted(nodes))
+            hit = Memo.cache.get(key)
+            if hit is None:
+                hit = CliqueScoreCalculator.is_valid_maximum_clique(self, nodes)
+                Memo.cache[key] = hit
+            return hit
     import fleet_pick
     import pick_static
     from oracle_pick import oracle_slots
@@ -96,6 +115,7 @@ def main():
 
         matrix = codec.decode_matrix(rec["encoded_matrix"])
         graph = _Graph(rec["number_of_nodes"], codec.matrix_to_list(matrix))
+        Memo.cache = {}                      # per round: the graph changes
 
         picks = {
             "shipped": fleet_pick.slots(pool, list(range(q))),
@@ -105,7 +125,7 @@ def main():
         }
         row = {}
         for name, sel in picks.items():
-            calc = CliqueScoreCalculator(
+            calc = Memo(
                 graph=graph, difficulty=rec["difficulty"],
                 responses=[list(c) for c in field] + [list(c) for c in sel])
             *_, rewards = calc.get_scores()
