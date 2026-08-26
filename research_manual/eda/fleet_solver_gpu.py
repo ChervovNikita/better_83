@@ -32,6 +32,16 @@ CHAMPION_SHARE = fleet_solver.CHAMPION_SHARE
 SPARE_MARGIN = fleet_solver.SPARE_MARGIN
 RESERVE_S = fleet_solver.RESERVE_S
 
+# Tail reserve for the GPU path: kernel exit after the stop flag, the result
+# copy-out, and the host re-verify. Measured at ~0.02s on an idle card, but the
+# whole solve was landing only 0.12s inside a 13s deadline, and a late answer
+# scores a hard zero for every hotkey in the round. Anything that perturbs the
+# card -- another process, a driver hiccup -- spends that margin. The harvest
+# saturates in well under a second on most rounds (measured), so buying the
+# margin back out of harvest time costs almost nothing.
+GPU_RESERVE_S = float(os.environ.get("SN83_GPU_RESERVE", "0.35"))
+GPU_RESERVE_FRAC = float(os.environ.get("SN83_GPU_RESERVE_FRAC", "0.03"))
+
 STEPS = int(os.environ.get("SN83_GPU_STEPS", "20000"))
 BOOT_STEPS = int(os.environ.get("SN83_GPU_BOOT_STEPS", "60000"))
 STEPS_CAP = int(os.environ.get("SN83_GPU_STEPS_CAP", str(1 << 20)))
@@ -75,7 +85,8 @@ def solve_many(adjacency_matrix, time_limit, k):
     assert 0 < n <= MAXN, "n=%d exceeds SN83_MAXN=%d" % (n, MAXN)
 
     import gpu_lib
-    deadline = time.monotonic() + time_limit - RESERVE_S
+    reserve = max(RESERVE_S, GPU_RESERVE_S, GPU_RESERVE_FRAC * time_limit)
+    deadline = time.monotonic() + time_limit - reserve
 
     champion = None
     if not GPU_ONLY:
@@ -83,10 +94,11 @@ def solve_many(adjacency_matrix, time_limit, k):
         assert champion
         champion = sorted(int(v) for v in champion)
 
-    left = deadline - time.monotonic()
-    assert left > 0.05, "%.3fs left of a %.3fs budget" % (left, time_limit)
-
+    # Opened before `left` is measured: the allocations and the graph upload are
+    # part of the round's clock, not free.
     with gpu_lib.GpuClique(A, lanes=LANES, prefix=PREFIX_ARM) as gpu:
+        left = deadline - time.monotonic()
+        assert left > 0.05, "%.3fs left of a %.3fs budget" % (left, time_limit)
         pool, counters = gpu.harvest(
             time_limit=left,
             seed=1,
@@ -98,30 +110,38 @@ def solve_many(adjacency_matrix, time_limit, k):
             max_out=max(4 * k, 1024))
     if champion:
         pool.append(champion)
+    pool.sort(key=len, reverse=True)
 
     # Exact re-check: a 64-bit fingerprint collision must cost a lost clique,
-    # never an invalid answer.
+    # never an invalid answer. Only what is actually returned is checked --
+    # verifying a full 1024-slot pool costs 0.1s of a 0.15s reserve.
     seen = set()
-    verified = []
+    out = []
+    spare = []
     for clique in pool:
         key = tuple(sorted(clique))
         if key in seen:
             continue
         is_clique, maximal = gpu_lib.verify(A, key)
-        if is_clique and maximal:
-            seen.add(key)
-            verified.append(key)
-    assert verified, "harvest returned %d cliques, none valid" % len(pool)
+        if not (is_clique and maximal):
+            continue
+        seen.add(key)
+        if not out or len(key) == len(out[0]):
+            out.append(key)
+        elif len(key) >= len(out[0]) - SPARE_MARGIN:
+            spare.append(key)
+        if len(out) >= k:
+            break
+    assert out, "harvest returned %d cliques, none valid" % len(pool)
 
-    target = max(len(c) for c in verified)
-    out = sorted(list(c) for c in verified if len(c) == target)
-    spare = sorted((list(c) for c in verified
-                    if target - SPARE_MARGIN <= len(c) < target),
-                   key=len, reverse=True)
+    target = len(out[0])
+    out = sorted(list(c) for c in out)
+    spare = [list(c) for c in spare]
 
     global _last_stats
     _last_stats = dict(counters)
     _last_stats["stall"] = gpu_lib.stall(counters)
+    _last_stats["pool"] = len(pool)
     _last_stats["distinct_max"] = len(out)
     _last_stats["spares"] = len(spare)
     if DEBUG:

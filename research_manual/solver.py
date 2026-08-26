@@ -9,9 +9,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "eda"))
 
-from fleet_pick import picker
-
 LATENCY_S = 2.0
+
+PICKER = os.environ.get("SN83_PICKER", "static").lower()
+assert PICKER in ("static", "legacy"), PICKER
+
+if PICKER == "legacy":
+    from fleet_pick import picker
+else:
+    from pick_static import picker
 
 SOLVER = os.environ.get("SN83_SOLVER", "gpu").lower()
 assert SOLVER in ("gpu", "cpu"), SOLVER

@@ -70,6 +70,17 @@ def percentile(value, values):
     return 100.0 * sum(1 for item in values if item < value) / len(values)
 
 
+def our_coldkey_median(scores_by_hotkey, our_hotkeys):
+    means = [
+        statistics.mean(scores_by_hotkey[hotkey])
+        for hotkey in our_hotkeys
+        if scores_by_hotkey[hotkey]
+    ]
+    if not means:
+        return None
+    return statistics.median(means)
+
+
 def print_percentile_hist(percentiles, n_unqueried):
     buckets = [0] * 10
     for pct in percentiles:
@@ -151,7 +162,9 @@ def run(rows, victims):
     coldkey_of = {}
     n_late = 0
     n_queried = 0
-    for _, round_id, rec in tqdm(rows, total=len(rows), file=sys.stderr):
+    our_hotkey_names = [our_name(index) for index in range(len(victims))]
+    bar = tqdm(rows, total=len(rows), file=sys.stderr)
+    for _, round_id, rec in bar:
         historical = []
         queried = set()
         for uid, hotkey, coldkey, clique in rec["answers"]:
@@ -210,6 +223,11 @@ def run(rows, victims):
             "answers": answers,
             "scores": scores,
         }
+        median = our_coldkey_median(scores_by_hotkey, our_hotkey_names)
+        if median is None:
+            bar.set_postfix_str("median=n/a")
+        else:
+            bar.set_postfix_str(f"median={median:.4f}")
     return out, scores_by_hotkey, coldkey_of, n_queried, n_late
 
 

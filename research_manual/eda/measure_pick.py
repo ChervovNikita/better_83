@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Score picker variants against the validator's own calculator.
+
+    .venv/bin/python research_manual/eda/measure_pick.py
+
+Reads pools.json (written by fit_field.py --build), so it re-scores in seconds
+instead of re-solving for 21 minutes.  Arms:
+
+    shipped   fleet_pick.picker, SPARE_CAP = 2
+    static    pick_static.picker, hold back when P < q
+    oracle    oracle_pick.oracle_slots -- reads the field, upper bound only
+
+fleet_pick's own comment records that converting the whole shortfall to spares
+measured worse than converting a little.  This is the measurement that says
+whether that holds once the choice is conditioned on P.
+"""
+
+import argparse
+import collections
+import json
+import os
+import sys
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PARENT = os.path.dirname(HERE)
+ROOT = os.path.dirname(PARENT)
+for _p in (ROOT, PARENT, HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+POOLS = os.path.join(HERE, "pools.json")
+TUNING = os.path.join(HERE, "tuning_data.json")
+
+
+class _Graph(object):
+    def __init__(self, n, adjacency_list):
+        self.number_of_nodes = n
+        self.adjacency_list = adjacency_list
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pools", default=POOLS)
+    ap.add_argument("--dump", default=TUNING)
+    ap.add_argument("--fleet", type=int, default=40)
+    args = ap.parse_args()
+
+    from CliqueAI.graph.codec import GraphCodec
+    from CliqueAI.scoring.clique_scoring import CliqueScoreCalculator
+    import fleet_pick
+    import pick_static
+    from oracle_pick import oracle_slots
+
+    def nodup_slots(pool, q):
+        """Always prefer omega, but never repeat: fill the rest with spares.
+
+        This is what the deployed path actually did, because solve_many returns
+        at most k cliques and the picker backfilled with the omega cliques it
+        meant to decline. Isolates "stop self-colliding" from "hold back".
+        """
+        omega = max(len(c) for c in pool)
+        top = [c for c in pool if len(c) == omega]
+        spare = sorted((c for c in pool if len(c) < omega), key=len, reverse=True)
+        use = list(top[:q])
+        use.extend(spare[:max(0, q - len(use))])
+        i = 0
+        while len(use) < q:
+            use.append(use[i % len(use)])
+            i += 1
+        return use[:q]
+
+    with open(args.pools) as handle:
+        pools = json.load(handle)
+    with open(args.dump) as handle:
+        payload = json.load(handle)
+    codec = GraphCodec()
+
+    arms = collections.defaultdict(list)
+    dup = collections.Counter()
+    print("%-24s %3s %6s %7s   %8s %8s %8s %8s"
+          % ("round", "q", "n_top", "n_spare", "shipped", "nodup", "static",
+             "oracle"))
+    for rid, cached in sorted(pools.items(),
+                              key=lambda kv: payload[kv[0]]["timestamp"]):
+        rec = payload[rid]
+        field = [tuple(c) for c in cached["field"]]
+        top = [tuple(c) for c in cached["top"]]
+        spare = [tuple(c) for c in cached["spare"]]
+        if not field or not top:
+            continue
+        pool = top + spare
+        p = 1.0 - np.exp(-max(0.0, np.sqrt(2.5) - rec["difficulty"] - 0.5))
+        q = max(1, int(round(args.fleet * p)))
+
+        matrix = codec.decode_matrix(rec["encoded_matrix"])
+        graph = _Graph(rec["number_of_nodes"], codec.matrix_to_list(matrix))
+
+        picks = {
+            "shipped": fleet_pick.slots(pool, list(range(q))),
+            "nodup": nodup_slots(pool, q),
+            "static": pick_static.slots(pool, list(range(q))),
+            "oracle": oracle_slots(pool, field, q, rec["difficulty"]),
+        }
+        row = {}
+        for name, sel in picks.items():
+            calc = CliqueScoreCalculator(
+                graph=graph, difficulty=rec["difficulty"],
+                responses=[list(c) for c in field] + [list(c) for c in sel])
+            *_, rewards = calc.get_scores()
+            row[name] = float(np.mean(rewards[len(field):]))
+            arms[name].append(row[name])
+            if len(set(tuple(sorted(c)) for c in sel)) < len(sel):
+                dup[name] += 1
+        print("n=%3d tl=%4.1f %8d %6d %7d   %8.4f %8.4f %8.4f %8.4f"
+              % (rec["number_of_nodes"], rec["time_limit"], q, len(top),
+                 len(spare), row["shipped"], row["nodup"], row["static"],
+                 row["oracle"]), flush=True)
+
+    n = len(arms["shipped"])
+    print()
+    print("%-10s %8s %10s %10s" % ("arm", "mean", "vs shipped", "rounds w/ dup"))
+    base = np.array(arms["shipped"])
+    for name in ("shipped", "nodup", "static", "oracle"):
+        v = np.array(arms[name])
+        print("%-10s %8.4f %+10.4f %10d"
+              % (name, v.mean(), v.mean() - base.mean(), dup[name]))
+
+    changed = [(a, b) for a, b in zip(arms["nodup"], arms["static"])
+               if abs(a - b) > 1e-9]
+    better = sum(1 for a, b in changed if b > a)
+    worse = len(changed) - better
+    print()
+    print("static vs NODUP: %d changed rounds, %d better / %d worse"
+          % (len(changed), better, worse))
+    if changed:
+        from math import comb
+        k = better + worse
+        pv = sum(comb(k, i) for i in range(min(better, worse) + 1)) / 2.0 ** k * 2
+        print("two-sided sign test over changed rounds: p = %.4g" % pv)
+    print("rounds %d" % n)
+
+
+if __name__ == "__main__":
+    main()

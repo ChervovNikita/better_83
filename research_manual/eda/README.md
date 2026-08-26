@@ -257,6 +257,56 @@ ceiling and not a fixable stack problem. `sn83_gpu_open` sizes the grid from
 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` rather than from the assumption,
 so the number in `GpuClique.info()` is what the card actually runs.
 
+## Tuning data, held out from the evaluation set
+
+`rounds.json` is the evaluation set. Anything fitted to it — a picker threshold,
+a `SPARE_CAP`, a hold-back rule — cannot then be honestly measured on it. So
+`dump_tuning.py` fetches rounds that are **strictly older**:
+
+```bash
+.venv/bin/python research_manual/eda/dump_tuning.py               # 100 rounds
+.venv/bin/python research_manual/eda/dump_tuning.py --rounds 200  # more
+```
+
+It needs `WANDB_API_KEY` (already in the repo `.env`) and wandb < 0.20, the same
+requirements as `research_manual/dump_wandb.py`, whose fetch it mirrors. Output
+is `research_manual/eda/tuning_data.json`, in exactly the `rounds.json` schema,
+so every existing tool reads it with `--dump` and nothing needed changing:
+
+```bash
+.venv/bin/python research_manual/simulate.py -N 40 --rounds 100 \
+    --dump research_manual/eda/tuning_data.json \
+    --out research_manual/eda/sim_tuning.json
+
+.venv/bin/python research_manual/distinct.py \
+    --dump research_manual/eda/tuning_data.json
+```
+
+The split is by **time**, not at random, and the tuning half is the earlier one —
+tune on the past, evaluate on the future, the direction the validator runs in. A
+random split would leak: rounds minutes apart share a metagraph, the same miners
+running the same solvers, and similar graph sizes.
+
+The script refuses to write unless every fetched round is strictly older than
+every round in `rounds.json` and no uuid appears in both. It also cannot use a
+fixed step offset — the validator keeps logging, so wandb's `head` drifts further
+above `rounds.json` every hour, and the scan walks backwards a window at a time
+until enough rounds predate the cutoff.
+
+What the current fetch produced:
+
+| | tuning | eval |
+|---|---|---|
+| rounds | 100 | 1000 |
+| timestamps | 1787642787 – 1787646105 | 1787646131 – 1787679607 |
+| median n | 496 | 500 |
+| median difficulty | 0.80 | 0.80 |
+| median omega | 36 | 37 |
+| median answers/round | 54 | 51 |
+
+Zero uuid overlap, and the tuning set ends 26 s before the eval set begins — so
+it is contiguous with it and distributionally matched, not a different regime.
+
 ## Running it in the simulator
 
 `research_manual/solver.py` imports `solve_many` from `fleet_solver_gpu`, so the
@@ -282,6 +332,35 @@ calculator — so unlike everything in `gates.py`, its output *is* reward.
 Watch the `late` count in its summary. A late answer is scored empty and takes a
 hard zero, and the GPU arm pays a per-round device-setup cost the CPU arm does
 not. `late 0` is the only acceptable reading.
+
+### The budget is spent, all of it
+
+`harvest()` has no early exit. It runs to its deadline, and `solve_many` lands
+within 0.05–0.12 s of the budget on every round measured.
+
+That is a correction, not a design choice. The first version stopped as soon as
+the device had `k + 4` results, which looked like a nice latency win and was
+actively costing reward: the result slots include omega-1 spares, so on a graph
+with a wide spare shelf the exit fired long before the omega pool filled.
+
+| round | early exit | full budget |
+|---|---|---|
+| n=894, 28 s budget | 5.0 s used, **8** distinct omega | 27.9 s used, **40** distinct omega |
+| n=899, 13 s budget | 2.7 s used, **2** distinct omega | 13.0 s used, 2 distinct omega |
+
+The n=894 row is 8 omega-cliques handed to 40 hotkeys — 32 of them repeating or
+dropping to a spare — where the same budget yields 40. The n=899 row is the
+control: it was not the early exit costing anything there, it is §6's ceiling
+(`stall = 1.00`, ban-based generation exhausted at 2).
+
+Latency earns nothing here. The deadline is fixed, so finishing early only gives
+up omega-cliques the fleet still needs and any chance of the epoch bump finding
+omega+1.
+
+Only the cliques actually returned are re-verified on the host. Verifying a full
+1024-slot pool costs ~0.1 s at n=900, which is most of the 0.15 s reserve; the
+pool arrives sorted by size, so checking until `k` omega-cliques are in hand
+costs ~40 checks instead of 1024.
 
 ### NO FALLBACK
 
