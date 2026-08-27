@@ -155,6 +155,8 @@ struct Queues {
 
 struct Pool {
     u64 *fp;            // open-addressed dedup table, 0 == empty
+    u32 *fp_res;        // table slot -> result slot, 0xFFFFFFFF until published
+    u32 *res_hits;      // jobs that landed on this clique: its BASIN SIZE
     u32 fpcap;          // power of two
     int *res_size;
     short *res_vert;    // res_cap rows of SN83_KMAX
@@ -788,16 +790,18 @@ __device__ void q_push(Queues &q, Pool &p, int L, Job j) {
 
 // Returns 1 new, 0 duplicate, -1 table saturated.
 
-__device__ int pool_insert(Pool &p, u64 fp) {
+// `out_slot` receives the table index so a duplicate can be attributed to the
+// result it repeats: that count is the clique's basin size.
+__device__ int pool_insert(Pool &p, u64 fp, u32 *out_slot) {
     const u32 mask = p.fpcap - 1u;
     u32 slot = (u32)(fp >> 32) & mask;
     for (u32 probe = 0; probe < 128u; ++probe) {
         u64 cur = p.fp[slot];
-        if (cur == fp) return 0;
+        if (cur == fp) { *out_slot = slot; return 0; }
         if (cur == 0ull) {
             u64 old = atomicCAS(&p.fp[slot], 0ull, fp);
-            if (old == 0ull) return 1;
-            if (old == fp) return 0;
+            if (old == 0ull) { *out_slot = slot; return 1; }
+            if (old == fp) { *out_slot = slot; return 0; }
         }
         slot = (slot + 1u) & mask;
     }
@@ -1061,13 +1065,17 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
 
             s.keep_flag = 0;
             if (o.size >= cur - cfg.spare_margin) {
-                int r = pool_insert(p, o.fp);
+                u32 tslot = 0u;
+                int r = pool_insert(p, o.fp, &tslot);
                 if (r == 1) {
                     atomicAdd(&p.ctr[C_NEW], 1ull);
                     if (o.size >= cur) atomicAdd(&p.ctr[C_NEWMAX], 1ull);
                     u32 slot = atomicAdd(p.n_res, 1u);
                     if (slot < p.res_cap) {
                         p.res_size[slot] = o.size;
+                        p.res_hits[slot] = 1u;
+                        __threadfence();
+                        p.fp_res[tslot] = slot;   // publish AFTER the row is set
                         s.res_slot = (int)slot;
                         s.keep_flag = 1;
                     } else {
@@ -1077,6 +1085,10 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
                 } else if (r == 0) {
                     atomicAdd(&p.ctr[C_DUP], 1ull);
                     if (o.size >= cur) atomicAdd(&p.ctr[C_DUPMAX], 1ull);
+                    u32 rs = p.fp_res[tslot];
+                    // 0xFFFFFFFF: the winner has not published its row yet, and
+                    // losing that one count is harmless
+                    if (rs < p.res_cap) atomicAdd(&p.res_hits[rs], 1u);
                 }
             }
             if (o.size < cur) {
@@ -1174,10 +1186,13 @@ __global__ void seed_kernel(Cfg cfg, Queues q, Pool p, const short *verts,
     h = mix64(h ^ ((u64)(unsigned)size * 0x9E3779B97F4A7C15ull));
     if (!h) h = 1ull;
     atomicMax(p.target, size);
-    if (pool_insert(p, h) == 1) {
+    u32 tslot = 0u;
+    if (pool_insert(p, h, &tslot) == 1) {
         u32 slot = atomicAdd(p.n_res, 1u);
         if (slot < p.res_cap) {
             p.res_size[slot] = size;
+            p.res_hits[slot] = 1u;
+            p.fp_res[tslot] = slot;
             for (int i = 0; i < size; ++i)
                 p.res_vert[(size_t)slot * SN83_KMAX + i] = verts[i];
             atomicAdd(&p.ctr[C_NEW], 1ull);
@@ -1549,6 +1564,8 @@ struct Handle {
     u64 *d_fp = nullptr;
     u32 fpcap = 0;
     int *d_res_size = nullptr;
+    u32 *d_res_hits = nullptr;
+    u32 *d_fp_res = nullptr;
     short *d_res_vert = nullptr;
     u32 *d_n_res = nullptr;
     u32 res_cap = 0;
@@ -1598,6 +1615,8 @@ Pool poolof(const Handle &h) {
     p.fp = h.d_fp;
     p.fpcap = h.fpcap;
     p.res_size = h.d_res_size;
+    p.res_hits = h.d_res_hits;
+    p.fp_res = h.d_fp_res;
     p.res_vert = h.d_res_vert;
     p.n_res = h.d_n_res;
     p.res_cap = h.res_cap;
@@ -1777,6 +1796,10 @@ void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
     if ((e = cudaMalloc(&h->d_res_vert,
                         (size_t)h->res_cap * SN83_KMAX * sizeof(short))) != cudaSuccess)
         return fail("cudaMalloc res_vert");
+    if ((e = cudaMalloc(&h->d_res_hits, (size_t)h->res_cap * sizeof(u32))) != cudaSuccess)
+        return fail("cudaMalloc res_hits");
+    if ((e = cudaMalloc(&h->d_fp_res, (size_t)h->fpcap * sizeof(u32))) != cudaSuccess)
+        return fail("cudaMalloc fp_res");
     if ((e = cudaMalloc(&h->d_n_res, sizeof(u32))) != cudaSuccess)
         return fail("cudaMalloc n_res");
     if ((e = cudaMalloc(&h->d_target, sizeof(int))) != cudaSuccess)
@@ -1807,6 +1830,8 @@ void sn83_gpu_close(void *hv) {
     cudaFree(h->d_qcnt);
     cudaFree(h->d_fp);
     cudaFree(h->d_res_size);
+    cudaFree(h->d_res_hits);
+    cudaFree(h->d_fp_res);
     cudaFree(h->d_res_vert);
     cudaFree(h->d_n_res);
     cudaFree(h->d_target);
@@ -2096,7 +2121,8 @@ int sn83_gpu_check_trajectory(void *hv, unsigned long long seed, int max_steps,
 int sn83_gpu_harvest(void *hv, double time_limit, unsigned long long seed,
                      int max_steps, int n_boot, int boot_steps, int max_steps_cap,
                      int spare_margin, const int *init_clique, int init_size,
-                     int *out_size, int *out_vert, int max_out, long long *out_ctr) {
+                     int *out_size, int *out_vert, int *out_hits, int max_out,
+                     long long *out_ctr) {
     Handle *h = (Handle *)hv;
     if (!h) return -1;
     if (max_steps <= 0) max_steps = 20000;
@@ -2114,6 +2140,8 @@ int sn83_gpu_harvest(void *hv, double time_limit, unsigned long long seed,
     // uninitialised vertices.  Bans are range-checked, so this was never an
     // out-of-bounds read -- but a ban drawn from garbage is a wasted job.
     cudaMemset(h->d_res_size, 0, (size_t)h->res_cap * sizeof(int));
+    cudaMemset(h->d_res_hits, 0, (size_t)h->res_cap * sizeof(u32));
+    cudaMemset(h->d_fp_res, 0xFF, (size_t)h->fpcap * sizeof(u32));
     cudaMemset(h->d_target, 0, sizeof(int));
     cudaMemset(h->d_epoch, 0, sizeof(u32));
     cudaMemset(h->d_done, 0, sizeof(int));
@@ -2183,6 +2211,12 @@ int sn83_gpu_harvest(void *hv, double time_limit, unsigned long long seed,
         CK(cudaMemcpy(&verts[0], h->d_res_vert, verts.size() * sizeof(short),
                       cudaMemcpyDeviceToHost));
         for (size_t i = 0; i < verts.size(); ++i) out_vert[i] = verts[i];
+        if (out_hits) {
+            std::vector<u32> hits((size_t)take);
+            CK(cudaMemcpy(&hits[0], h->d_res_hits, (size_t)take * sizeof(u32),
+                          cudaMemcpyDeviceToHost));
+            for (int i = 0; i < take; ++i) out_hits[i] = (int)hits[i];
+        }
     }
     if (out_ctr) {
         u64 ctr[C_NCTR];

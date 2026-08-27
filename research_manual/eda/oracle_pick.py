@@ -201,7 +201,7 @@ def main():
         champ = sorted(fg.fleet_solver._solve_one(A, budget * fg.CHAMPION_SHARE,
                                                   seed=1))
         with gpu_lib.GpuClique(A) as gpu:
-            raw, _ = gpu.harvest(budget * (1 - fg.CHAMPION_SHARE) - fg.RESERVE_S,
+            raw, _, _hits = gpu.harvest(budget * (1 - fg.CHAMPION_SHARE) - fg.RESERVE_S,
                                  seed=1, max_steps=fg.STEPS,
                                  boot_steps=fg.BOOT_STEPS, init_clique=champ,
                                  max_out=4096)

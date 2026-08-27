@@ -103,7 +103,7 @@ def solve_many(adjacency_matrix, time_limit, k):
     with gpu_lib.GpuClique(A, lanes=LANES, prefix=PREFIX_ARM) as gpu:
         left = deadline - time.monotonic()
         assert left > 0.05, "%.3fs left of a %.3fs budget" % (left, time_limit)
-        pool, counters = gpu.harvest(
+        pool, counters, _hits = gpu.harvest(
             time_limit=left,
             seed=1,
             max_steps=STEPS,

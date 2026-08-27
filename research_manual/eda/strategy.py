@@ -92,107 +92,106 @@ def _spread(t, n_distinct):
     return [base + 1] * extra + [base] * (n_distinct - extra)
 
 
-def fill(n_top, n_spare, t, q):
-    """Multiplicities per distinct clique for `t` hotkeys on omega.
+def marginal(a, n_distinct, m, A):
+    """Gain from the m-th of our hotkeys on one clique. DERIVATION.md, "Marginals".
 
-    Returns (top_counts, spare_counts).  Distinct cliques are exhausted at BOTH
-    sizes before anything is duplicated: a repeat earns no diversity at all once
-    f = 0, while a distinct clique one vertex shorter still earns a full unit as
-    long as opt(s) > D/(1+D).
+    A = opt(size) * (1 + difficulty);  the diversity part is
+    E[m/(F+m)] - E[(m-1)/(F+m-1)] with F ~ Bin(a, 1/n_distinct).
     """
-    top_counts = [0] * max(0, n_top)
-    for i in range(t):                          # wraps only once t > n_top
-        top_counts[i % max(1, n_top)] += 1
-
-    short = q - t
-    spare_counts = []
-    if short > 0 and n_spare > 0:
-        take = min(short, n_spare)
-        spare_counts = [1] * take
-        short -= take
-    if short > 0:
-        unused = [i for i, c in enumerate(top_counts) if c == 0]
-        for i in unused[:short]:
-            top_counts[i] += 1
-        short -= min(short, len(unused))
-    if short > 0:                               # nothing distinct left anywhere
-        for i in range(short):
-            if spare_counts:
-                spare_counts[i % len(spare_counts)] += 1
-            else:
-                top_counts[i % max(1, n_top)] += 1
-    return top_counts, spare_counts
+    assert m >= 1
+    return A + expected_share(a, n_distinct, m) - expected_share(a, n_distinct, m - 1)
 
 
-def _value(top_counts, spare_counts, q, omega, n_top, n_spare, n_others,
-           a_hat, b_hat, difficulty):
-    """Expected mean reward per hotkey for one concrete fill."""
-    at_omega = a_hat + sum(top_counts)
-    total = n_others + q
-    if at_omega == 0:
-        opt_short = 1.0          # nobody at omega -> M drops, no cost at all
-    else:
-        opt_short = math.exp(-(at_omega / float(total)) * omega / (omega - 1.0))
+def _greedy(classes, q):
+    """Top-q marginals, which is exactly optimal for fixed A (DERIVATION.md).
 
-    value = 0.0
-    for m in top_counts:
-        if m:
-            value += m * (1.0 + difficulty) + expected_share(a_hat, n_top, m)
-    for m in spare_counts:
-        if m:
-            value += m * opt_short * (1.0 + difficulty) \
-                     + expected_share(b_hat, max(1, n_spare), m)
-    return value / q
+    `classes` is [(key, n_distinct, a, A)] -- one entry per size class. Within a
+    class every clique has the same marginal under A4, so greedy round-robins and
+    the allocation is fully described by how many hotkeys each class receives.
+    """
+    counts = {k: 0 for k, _n, _a, _A in classes}
+    total = 0.0
+    for _ in range(q):
+        best, best_gain = None, None
+        for key, n_distinct, a, A in classes:
+            if n_distinct <= 0:
+                continue
+            taken = counts[key]
+            # round-robin: the next hotkey lands on the least-loaded clique,
+            # which currently holds floor(taken / n_distinct)
+            m = taken // n_distinct + 1
+            gain = marginal(a, n_distinct, m, A)
+            if best_gain is None or gain > best_gain:
+                best, best_gain = key, gain
+        if best is None:
+            break
+        counts[best] += 1
+        total += best_gain
+    return counts, total
 
 
 def plan(q, omega, n_top, n_spare, n_others, a_hat, difficulty, b_hat=0):
-    """Best t, by expected reward over the fill it actually produces.
+    """How many hotkeys go to omega, and how many to omega-1.
 
-    q        our queried hotkeys
-    omega    the max clique size our solver found
-    n_top    distinct omega-cliques we hold
-    n_spare  distinct (omega-1)-cliques we hold
-    n_others other answers in the round
-    a_hat    predicted number of OTHER answers at omega
-    b_hat    predicted number of OTHER answers at omega-1
+    Enumerates the size split t (A5: opt depends on it), solving each split
+    exactly by greedy, and keeps the best.  Returns a Plan whose detail carries
+    the per-class counts.
     """
     assert q > 0 and omega > 0 and n_top > 0
     a_hat = max(0, int(round(a_hat)))
     b_hat = max(0, int(round(b_hat)))
-    n_others = max(0, int(n_others))
+    total_answers = max(1, int(n_others) + q)
 
     best = None
     for t in range(0, q + 1):
         if t < q and (n_spare <= 0 or omega <= 1):
-            continue                       # nothing to hold back into
-        tc, sc = fill(n_top, n_spare, t, q)
-        value = _value(tc, sc, q, omega, n_top, n_spare, n_others, a_hat, b_hat,
-                       difficulty)
-        detail = {"t": t, "top_counts": tc, "spare_counts": sc,
-                  "distinct": sum(1 for m in tc + sc if m),
-                  "duplicated": sum(m - 1 for m in tc + sc if m > 1)}
-        if best is None or value > best.value:
-            best = Plan(t, value, detail)
-    assert best is not None
+            continue
+        at_omega = a_hat + t
+        opt_short = (1.0 if at_omega == 0 else
+                     math.exp(-(at_omega / float(total_answers)) * omega / (omega - 1.0)))
+        classes = [("top", n_top, a_hat, 1.0 * (1.0 + difficulty))]
+        if n_spare > 0 and omega > 1:
+            classes.append(("spare", n_spare, b_hat, opt_short * (1.0 + difficulty)))
+        counts, value = _greedy(classes, q)
+        if counts.get("top", 0) != t:
+            continue                    # greedy disagrees with this split; skip
+        detail = {"t": t, "counts": counts, "opt_short": opt_short,
+                  "top_spread": _spread(counts.get("top", 0), n_top),
+                  "spare_spread": _spread(counts.get("spare", 0), max(1, n_spare))}
+        detail["distinct"] = sum(1 for m in detail["top_spread"] + detail["spare_spread"] if m)
+        detail["duplicated"] = sum(m - 1 for m in detail["top_spread"] + detail["spare_spread"] if m > 1)
+        if best is None or value / q > best.value:
+            best = Plan(t, value / q, detail)
+
+    if best is None:                    # no split was self-consistent: take greedy's
+        classes = [("top", n_top, a_hat, 1.0 * (1.0 + difficulty))]
+        if n_spare > 0 and omega > 1:
+            classes.append(("spare", n_spare, b_hat, 1.0 + difficulty))
+        counts, value = _greedy(classes, q)
+        detail = {"t": counts.get("top", 0), "counts": counts, "opt_short": 1.0,
+                  "top_spread": _spread(counts.get("top", 0), n_top),
+                  "spare_spread": _spread(counts.get("spare", 0), max(1, n_spare))}
+        detail["distinct"] = sum(1 for m in detail["top_spread"] + detail["spare_spread"] if m)
+        detail["duplicated"] = sum(m - 1 for m in detail["top_spread"] + detail["spare_spread"] if m > 1)
+        best = Plan(counts.get("top", 0), value / q, detail)
     return best
 
 
 def slots(pool, q, n_others, a_hat, difficulty, b_hat=0):
-    """The cliques to submit: plan(), then the same fill it was scored on."""
+    """The q cliques to submit, from plan()'s per-class counts."""
     assert pool and q > 0
     pool = [tuple(c) for c in pool]
     omega = max(len(c) for c in pool)
     top = [c for c in pool if len(c) == omega]
     spare = sorted((c for c in pool if len(c) < omega), key=len, reverse=True)
     p = plan(q, omega, len(top), len(spare), n_others, a_hat, difficulty, b_hat)
-    tc, sc = fill(len(top), len(spare), p.t, q)
 
     out = []
-    for c, m in zip(top, tc):
+    for c, m in zip(top, p.detail["top_spread"]):
         out.extend([c] * m)
-    for c, m in zip(spare, sc):
+    for c, m in zip(spare, p.detail["spare_spread"]):
         out.extend([c] * m)
-    assert len(out) == q, (len(out), q)
+    assert len(out) == q, (len(out), q, p.detail)
     return [list(c) for c in out]
 
 

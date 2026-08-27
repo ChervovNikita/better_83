@@ -97,7 +97,8 @@ def _bind(lib):
     lib.sn83_gpu_harvest.argtypes = [
         c.c_void_p, c.c_double, u64, c.c_int, c.c_int, c.c_int, c.c_int,
         c.c_int, c.POINTER(c.c_int), c.c_int, c.POINTER(c.c_int),
-        c.POINTER(c.c_int), c.c_int, c.POINTER(c.c_longlong)]
+        c.POINTER(c.c_int), c.POINTER(c.c_int), c.c_int,
+        c.POINTER(c.c_longlong)]
 
 
 def verify(A, clique):
@@ -237,14 +238,20 @@ class GpuClique(object):
     def harvest(self, time_limit, seed=1, max_steps=20000, n_boot=0,
                 boot_steps=0, max_steps_cap=1 << 20, spare_margin=1,
                 init_clique=None, max_out=4096):
-        """Runs to the deadline. Returns (cliques, counters).
+        """Runs to the deadline. Returns (cliques, counters, hits).
 
         Every clique is maximal in the full graph. There is no early exit: the
         budget is fixed, latency earns nothing, and stopping early costs both
         omega-cliques the fleet still needs and any chance of finding omega+1.
+
+        `hits` is each clique's BASIN SIZE -- how many independent jobs converged
+        on it. A large basin is what makes a clique easy for every other solver
+        to find too, so this is the device's own estimate of how crowded that
+        clique will be in the field.
         """
         sizes = np.zeros(max_out, dtype=np.int32)
         verts = np.zeros((max_out, self.kmax), dtype=np.int32)
+        hits = np.zeros(max_out, dtype=np.int32)
         ctr = np.zeros(self.n_ctr, dtype=np.int64)
         init = np.ascontiguousarray(list(init_clique or []), dtype=np.int32)
         got = self.lib.sn83_gpu_harvest(
@@ -253,9 +260,12 @@ class GpuClique(object):
             int(spare_margin),
             init.ctypes.data_as(ctypes.POINTER(ctypes.c_int)), int(init.size),
             sizes.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
-            verts.ctypes.data_as(ctypes.POINTER(ctypes.c_int)), int(max_out),
+            verts.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            hits.ctypes.data_as(ctypes.POINTER(ctypes.c_int)), int(max_out),
             ctr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)))
         assert got >= 0, "harvest: " + self.last_error()
-        out = [sorted(int(v) for v in verts[i, :sizes[i]]) for i in range(got)]
-        out.sort(key=len, reverse=True)
-        return out, dict(zip(CTR_NAMES, ctr.tolist()))
+        rows = [(sorted(int(v) for v in verts[i, :sizes[i]]), int(hits[i]))
+                for i in range(got)]
+        rows.sort(key=lambda r: (-len(r[0]), -r[1]))
+        return ([c for c, _h in rows], dict(zip(CTR_NAMES, ctr.tolist())),
+                [h for _c, h in rows])

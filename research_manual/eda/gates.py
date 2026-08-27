@@ -203,7 +203,7 @@ def stage3(args):
                 init = sorted(fleet_solver._solve_one(
                     A, budget * fleet_solver.CHAMPION_SHARE, seed=1))
             left = budget - (time.time() - started)
-            pool, ctr = gpu.harvest(max(0.05, left), seed=1,
+            pool, ctr, _hits = gpu.harvest(max(0.05, left), seed=1,
                                     max_steps=args.steps,
                                     boot_steps=args.boot_steps,
                                     init_clique=init, max_out=8192)
@@ -245,7 +245,7 @@ def stage4(args):
         budget = max(0.5, min(args.budget, tl - 2.0))
         started = time.time()
         with gpu_lib.GpuClique(A, lanes=args.lanes, prefix=args.prefix) as gpu:
-            pool, ctr = gpu.harvest(budget, seed=1, max_steps=args.steps,
+            pool, ctr, _hits = gpu.harvest(budget, seed=1, max_steps=args.steps,
                                     boot_steps=args.boot_steps, max_out=8192)
         elapsed = time.time() - started
         bad = sum(1 for c in pool if not all(gpu_lib.verify(A, c)))

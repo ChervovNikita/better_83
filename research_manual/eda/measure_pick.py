@@ -45,6 +45,7 @@ def main():
     ap.add_argument("--pools", default=POOLS)
     ap.add_argument("--dump", default=TUNING)
     ap.add_argument("--fleet", type=int, default=40)
+    ap.add_argument("--limit", type=int, default=0, help="first N rounds only")
     args = ap.parse_args()
 
     from CliqueAI.graph.codec import GraphCodec
@@ -70,7 +71,13 @@ def main():
             return hit
     import fleet_pick
     import pick_static
+    import strategy
     from oracle_pick import oracle_slots
+
+    # Field-blind prediction of how many other answers reach omega: the step
+    # model fitted on tuning (a/n_others = 0.06 below n_top 5, 1.00 above).
+    def predict_a(n_top, n_others):
+        return (0.06 if n_top <= 5 else 1.00) * n_others
 
     def nodup_slots(pool, q):
         """Always prefer omega, but never repeat: fill the rest with spares.
@@ -98,11 +105,15 @@ def main():
 
     arms = collections.defaultdict(list)
     dup = collections.Counter()
-    print("%-24s %3s %6s %7s   %8s %8s %8s %8s"
-          % ("round", "q", "n_top", "n_spare", "shipped", "nodup", "static",
-             "oracle"))
-    for rid, cached in sorted(pools.items(),
-                              key=lambda kv: payload[kv[0]]["timestamp"]):
+    cols = ("round", "q", "n_top", "n_spare", "shipped", "nodup", "static",
+            "greedy", "oracle")
+    fmt = "%-14s %3s %6s %7s  %8s %8s %8s %8s %8s"
+    print(fmt % cols)
+    print(fmt % tuple("-" * len(c) for c in cols))
+    ordered = sorted(pools.items(), key=lambda kv: payload[kv[0]]["timestamp"])
+    if args.limit:
+        ordered = ordered[:args.limit]
+    for rid, cached in ordered:
         rec = payload[rid]
         field = [tuple(c) for c in cached["field"]]
         top = [tuple(c) for c in cached["top"]]
@@ -121,6 +132,10 @@ def main():
             "shipped": fleet_pick.slots(pool, list(range(q))),
             "nodup": nodup_slots(pool, q),
             "static": pick_static.slots(pool, list(range(q))),
+            "greedy": strategy.slots(pool, q, len(field),
+                                     predict_a(len(top), len(field)),
+                                     rec["difficulty"],
+                                     b_hat=len(field) - predict_a(len(top), len(field))),
             "oracle": oracle_slots(pool, field, q, rec["difficulty"]),
         }
         row = {}
@@ -133,26 +148,26 @@ def main():
             arms[name].append(row[name])
             if len(set(tuple(sorted(c)) for c in sel)) < len(sel):
                 dup[name] += 1
-        print("n=%3d tl=%4.1f %8d %6d %7d   %8.4f %8.4f %8.4f %8.4f"
-              % (rec["number_of_nodes"], rec["time_limit"], q, len(top),
-                 len(spare), row["shipped"], row["nodup"], row["static"],
-                 row["oracle"]), flush=True)
+        print("%-14s %3d %6d %7d  %8.4f %8.4f %8.4f %8.4f %8.4f"
+              % ("n=%d tl=%g" % (rec["number_of_nodes"], rec["time_limit"]),
+                 q, len(top), len(spare), row["shipped"], row["nodup"],
+                 row["static"], row["greedy"], row["oracle"]), flush=True)
 
     n = len(arms["shipped"])
     print()
     print("%-10s %8s %10s %10s" % ("arm", "mean", "vs shipped", "rounds w/ dup"))
     base = np.array(arms["shipped"])
-    for name in ("shipped", "nodup", "static", "oracle"):
+    for name in ("shipped", "nodup", "static", "greedy", "oracle"):
         v = np.array(arms[name])
         print("%-10s %8.4f %+10.4f %10d"
               % (name, v.mean(), v.mean() - base.mean(), dup[name]))
 
-    changed = [(a, b) for a, b in zip(arms["nodup"], arms["static"])
+    changed = [(a, b) for a, b in zip(arms["static"], arms["greedy"])
                if abs(a - b) > 1e-9]
     better = sum(1 for a, b in changed if b > a)
     worse = len(changed) - better
     print()
-    print("static vs NODUP: %d changed rounds, %d better / %d worse"
+    print("greedy vs STATIC: %d changed rounds, %d better / %d worse"
           % (len(changed), better, worse))
     if changed:
         from math import comb
