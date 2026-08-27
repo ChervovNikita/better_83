@@ -41,6 +41,7 @@ the gap against the oracle so the size of that error is visible.
 
 import argparse
 import collections
+import heapq
 import math
 
 
@@ -100,6 +101,64 @@ def marginal(a, n_distinct, m, A):
     """
     assert m >= 1
     return A + expected_share(a, n_distinct, m) - expected_share(a, n_distinct, m - 1)
+
+
+def crowding(hits, a_hat, kappa=0.69, beta=0.0):
+    """Expected field miners on each of our cliques, from their basin sizes.
+
+    A4 assumes every clique of a size carries the same F, which lets plan()
+    choose HOW MANY hotkeys go to omega but never WHICH clique.  Basin size
+    relaxes it:
+
+        w_c = (1 + hits_c)^(-beta)
+        f_c = kappa * a_hat * w_c / sum_c' w_c'
+
+    beta = 0 reproduces the uniform model exactly.  beta > 0 makes big-basin
+    cliques less crowded, which is the measured direction (biggest-basin
+    quartile 1.607 field miners against 1.919 for the smallest).  kappa is the
+    share of the field's omega answers that land inside our pool, measured at
+    0.69, so it is a constant rather than a free parameter.
+    """
+    n = len(hits)
+    if n == 0:
+        return []
+    if beta <= 0.0:
+        return [kappa * a_hat / n] * n
+    w = [(1.0 + max(0, h)) ** (-beta) for h in hits]
+    tot = sum(w) or 1.0
+    return [kappa * a_hat * x / tot for x in w]
+
+
+def greedy_per_clique(items, q):
+    """Top-q marginals over INDIVIDUAL cliques (DERIVATION.md, greedy theorem).
+
+    `items` is [(key, f_c, A_c)].  Unlike _greedy this does not assume cliques
+    of a size are exchangeable, so it can send solo picks to the least crowded
+    and duplicates to the most crowded -- the two rules the uniform model could
+    not express at the same time.
+    """
+    counts = collections.defaultdict(int)
+    total = 0.0
+    heap = []
+    for key, f, A in items:
+        heapq.heappush(heap, (-(A + _dup_gain(f, 1)), key, f, A))
+    for _ in range(q):
+        if not heap:
+            break
+        neg, key, f, A = heapq.heappop(heap)
+        counts[key] += 1
+        total += -neg
+        heapq.heappush(heap, (-(A + _dup_gain(f, counts[key] + 1)), key, f, A))
+    return dict(counts), total
+
+
+def _dup_gain(f, m):
+    """Diversity from the m-th hotkey on a clique f others hold."""
+    if m <= 1:
+        return 1.0 / (f + 1.0)
+    if f <= 0:
+        return 0.0
+    return f / ((f + m) * (f + m - 1.0))
 
 
 def _greedy(classes, q):
@@ -175,6 +234,62 @@ def plan(q, omega, n_top, n_spare, n_others, a_hat, difficulty, b_hat=0):
         detail["duplicated"] = sum(m - 1 for m in detail["top_spread"] + detail["spare_spread"] if m > 1)
         best = Plan(counts.get("top", 0), value / q, detail)
     return best
+
+
+def slots_hits(pool, hits, q, n_others, a_hat, difficulty, b_hat=0, beta=0.0,
+               kappa=0.69):
+    """Allocation using per-clique crowding estimated from basin size.
+
+    Same value function as plan(), but A4 is relaxed: each clique carries its
+    own f_c from crowding(), so greedy can send solo picks to the least crowded
+    and duplicates to the most crowded at the same time.  beta = 0 makes the f_c
+    uniform and reproduces plan()'s behaviour.
+
+    The size split still has to be enumerated (A5): opt(omega-1) depends on how
+    many of OUR answers sit at omega, so each candidate t is solved and kept only
+    if greedy independently agrees with it.
+    """
+    assert pool and q > 0
+    pool = [tuple(c) for c in pool]
+    hits = list(hits)
+    assert len(hits) == len(pool), (len(hits), len(pool))
+    omega = max(len(c) for c in pool)
+    top = [(c, h) for c, h in zip(pool, hits) if len(c) == omega]
+    spare = sorted(((c, h) for c, h in zip(pool, hits) if len(c) < omega),
+                   key=lambda r: (-len(r[0]), -r[1]))
+    total = max(1, int(n_others) + q)
+    f_top = crowding([h for _c, h in top], a_hat, kappa, beta)
+    f_spare = crowding([h for _c, h in spare], b_hat, kappa, beta)
+
+    best = None
+    for t in range(0, q + 1):
+        if t < q and not spare:
+            continue
+        at_omega = a_hat + t
+        opt_short = (1.0 if at_omega <= 0 else
+                     math.exp(-(at_omega / float(total)) * omega / (omega - 1.0)))
+        items = [(("t", i), f_top[i], 1.0 * (1.0 + difficulty))
+                 for i in range(len(top))]
+        items += [(("s", i), f_spare[i], opt_short * (1.0 + difficulty))
+                  for i in range(len(spare))]
+        counts, value = greedy_per_clique(items, q)
+        if sum(v for k, v in counts.items() if k[0] == "t") != t:
+            continue
+        if best is None or value > best[1]:
+            best = (counts, value)
+    if best is None:
+        items = [(("t", i), f_top[i], 1.0 * (1.0 + difficulty))
+                 for i in range(len(top))]
+        items += [(("s", i), f_spare[i], 1.0 + difficulty)
+                  for i in range(len(spare))]
+        best = greedy_per_clique(items, q)
+
+    out = []
+    for key, m in sorted(best[0].items()):
+        src = top if key[0] == "t" else spare
+        out.extend([src[key[1]][0]] * m)
+    assert len(out) == q, (len(out), q)
+    return [list(c) for c in out]
 
 
 def slots(pool, q, n_others, a_hat, difficulty, b_hat=0):

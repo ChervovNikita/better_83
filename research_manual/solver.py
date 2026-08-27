@@ -11,11 +11,17 @@ sys.path.insert(0, os.path.join(HERE, "eda"))
 
 LATENCY_S = 2.0
 
+# static : t = q if P >= q else 0, never repeats a clique
+# value  : scores the split with strategy.plan; needs the round size, which it
+#          derives from q and the fleet/metagraph sizes
+# legacy : fleet_pick, SPARE_CAP = 2
 PICKER = os.environ.get("SN83_PICKER", "static").lower()
-assert PICKER in ("static", "legacy"), PICKER
+assert PICKER in ("static", "value", "legacy"), PICKER
 
 if PICKER == "legacy":
     from fleet_pick import picker
+elif PICKER == "value":
+    from pick_value import picker
 else:
     from pick_static import picker
 

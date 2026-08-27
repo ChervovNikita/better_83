@@ -89,12 +89,15 @@ def build(args):
         champ = sorted(fg.fleet_solver._solve_one(A, budget * fg.CHAMPION_SHARE,
                                                   seed=1))
         with gpu_lib.GpuClique(A) as gpu:
-            raw, _, _hits = gpu.harvest(budget * (1 - fg.CHAMPION_SHARE) - fg.RESERVE_S,
+            raw, _, hits = gpu.harvest(budget * (1 - fg.CHAMPION_SHARE) - fg.RESERVE_S,
                                  seed=1, max_steps=fg.STEPS,
                                  boot_steps=fg.BOOT_STEPS, init_clique=champ,
                                  max_out=4096)
-        pool = sorted({tuple(c) for c in raw if all(gpu_lib.verify(A, c))},
-                      key=len, reverse=True)
+        keep = [(tuple(c), h) for c, h in zip(raw, hits)
+                if all(gpu_lib.verify(A, c))]
+        keep.sort(key=lambda r: (-len(r[0]), -r[1]))
+        pool = [c for c, _h in keep]
+        hits = [h for _c, h in keep]
         if not pool:
             continue
         omega_ours = len(pool[0])
@@ -116,10 +119,13 @@ def build(args):
             "field_distinct_at_omega": len({tuple(c) for c in field
                                             if len(c) == omega}),
         }
+        hit_of = {tuple(c): h for c, h in zip(pool, hits)}
         top = [list(c) for c in pool if len(c) == omega_ours][:POOL_CAP]
         spare = [list(c) for c in pool if len(c) == omega_ours - 1][:POOL_CAP]
         pools[rid] = {"top": top, "spare": spare,
-                      "field": [list(c) for c in field]}
+                      "field": [list(c) for c in field],
+                      "top_hits": [hit_of[tuple(c)] for c in top],
+                      "spare_hits": [hit_of[tuple(c)] for c in spare]}
         out.append(rec_out)
         print("  %3d/%d n=%3d omega=%3d n_top=%4d -> a=%3d b=%3d"
               % (i, len(rows), rec_out["n"], omega, rec_out["n_top"],
