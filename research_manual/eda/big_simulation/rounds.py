@@ -1,7 +1,12 @@
 """Rounds loaded from a solved pool dump, with their cliques already known."""
 
 import json
+import math
 import os
+import random
+import zlib
+
+REF_R = 1.5
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -24,7 +29,8 @@ class Round(object):
     """One solved round: its clique supply and how many miners answered."""
 
     __slots__ = ("uuid", "difficulty", "omega", "n_top", "n_spare",
-                 "n_answers", "q_a", "q_b", "fleet_a", "fleet_b")
+                 "n_answers", "q_a", "q_b", "q_b_oracle", "fleet_a",
+                 "fleet_b")
 
     def __repr__(self):
         return ("Round(%s D=%.1f omega=%d P=%d spare=%d answers=%d)"
@@ -60,6 +66,7 @@ def load(pool_path=None, rounds_path=None):
             rnd.n_answers = sum(1 for a in field[uuid]["answers"] if a[3])
             rnd.q_a = 0
             rnd.q_b = 0
+            rnd.q_b_oracle = 0
             rnd.fleet_a = 0
             rnd.fleet_b = 0
             out.append(rnd)
@@ -67,10 +74,28 @@ def load(pool_path=None, rounds_path=None):
     return out
 
 
-def split_queries(rnd, g, o):
-    """Divides the round's real answer count between the two fleets."""
+def selection_p(difficulty):
+    """The validator's per-hotkey query probability, from MinerSelector."""
+    return 1.0 - math.exp(-max(0.0, math.sqrt(1.0 + REF_R) - difficulty - 0.5))
+
+
+def split_queries(rnd, g, o, rng=None, seed=0):
+    """Draws how many hotkeys of each fleet the validator queries.
+
+    MinerSelector.sample_miner_uids gives every eligible miner the SAME
+    probability P and draws each independently, so the two counts are
+    independent Binomials rather than a split of one total. Deriving them from a
+    single observed answer count instead ties them together at correlation
+    0.999, which hands the first player an estimate of its opponent that the
+    real mechanism does not provide.
+    """
     assert g > 0 and o > 0
-    assert rnd.n_answers >= 2
-    q_a = int(round(rnd.n_answers * g / float(g + o)))
-    q_a = max(1, min(rnd.n_answers - 1, q_a))
-    return q_a, rnd.n_answers - q_a
+    p = selection_p(rnd.difficulty)
+    if rng is None:
+        # zlib.crc32 is stable across processes; hash() on a str is salted by
+        # PYTHONHASHSEED, so seeding from it made every run draw different
+        # queries and no two runs comparable.
+        rng = random.Random(zlib.crc32(rnd.uuid.encode()) ^ (seed * 0x9E3779B1))
+    q_a = sum(1 for _ in range(g) if rng.random() < p)
+    q_b = sum(1 for _ in range(o) if rng.random() < p)
+    return max(1, q_a), max(1, q_b)

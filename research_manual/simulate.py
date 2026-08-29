@@ -40,7 +40,13 @@ class Graph:
         self.adjacency_list = adjacency_list
 
 
-def load_rounds(path, n_rounds):
+def load_rounds(path, n_rounds, only=None):
+    """The first n_rounds by timestamp, or those named in `only`.
+
+    `only` is a file of round ids, one per line: it selects a stratum decided
+    outside this script rather than a deadline slice, since the deadline
+    proxies graph size and slicing on it stratifies by the variable under test.
+    """
     with open(path) as handle:
         payload = json.load(handle)
     rows = []
@@ -50,6 +56,12 @@ def load_rounds(path, n_rounds):
         rows.append((rec["timestamp"], round_id, rec))
     rows.sort(key=lambda item: item[0])
     assert rows
+    if only:
+        with open(only) as handle:
+            wanted = {line.strip() for line in handle if line.strip()}
+        rows = [row for row in rows if row[1] in wanted]
+        assert len(rows) == len(wanted), (len(rows), len(wanted))
+        return rows
     assert n_rounds <= len(rows), (n_rounds, len(rows))
     return rows[:n_rounds]
 
@@ -312,6 +324,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-N", type=int, required=True)
     parser.add_argument("--rounds", type=int, required=True)
+    parser.add_argument("--only", default="",
+                        help="file of round ids to run instead of the first --rounds")
     parser.add_argument("--dump", default=ROUNDS_PATH)
     parser.add_argument("--metagraph", default=METAGRAPH_PATH)
     parser.add_argument("--out", default=OUT_PATH)
@@ -325,7 +339,7 @@ def main():
         meta["miners"], key=lambda miner: (miner["incentive"], miner["uid"])
     )
     victims = pick_victims(meta, args.N)
-    rows = load_rounds(args.dump, args.rounds)
+    rows = load_rounds(args.dump, args.rounds, args.only)
     out, scores_by_hotkey, coldkey_of, n_queried, n_late = run(
         rows, victims
     )

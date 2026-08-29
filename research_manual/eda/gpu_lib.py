@@ -18,7 +18,8 @@ ARCH = os.environ.get("SN83_GPU_ARCH", "86")
 # Mirrors the counter enum in clique_gpu.cu.
 CTR_NAMES = [
     "jobs", "new", "dup", "short", "drop", "banback", "steps", "synth",
-    "enq", "done", "overflow", "kmaxhit", "dupmax", "newmax", "_14", "_15",
+    "enq", "done", "overflow", "kmaxhit", "dupmax", "newmax",
+    "ovf_top", "ovf_spare",
 ]
 
 MAX_BANS = 8

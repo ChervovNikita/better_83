@@ -129,6 +129,58 @@ def _brute_full(board, rnd, q):
     return best
 
 
+def check_weighted(trials=200, seed=5):
+    """Compares the weighted best response to exhaustive search on w_b*B - w_a*A."""
+    rng = random.Random(seed)
+    import native
+    bad = total = 0
+    worst = 0.0
+    for _ in range(trials):
+        rnd = _fake_round(rng)
+        w_a = rng.choice([0.25, 0.5, 1.0, 2.0])
+        w_b = rng.choice([0.25, 0.5, 1.0, 2.0])
+        board = strategies.REGISTRY["greedy"](rnd, rnd.q_a, score)
+        _t, mean_a, mean_b = native.best_response_weighted(board, rnd, rnd.q_b,
+                                                           w_a, w_b)
+        got = w_b * mean_b - w_a * mean_a
+        best = None
+        for trial in _all_replies(board, rnd, rnd.q_b):
+            x, y = score(trial, rnd.difficulty)
+            v = w_b * y - w_a * x
+            if best is None or v > best:
+                best = v
+        total += 1
+        if best - got > 1e-9:
+            bad += 1
+            worst = max(worst, best - got)
+    return bad, total, worst
+
+
+def _all_replies(board, rnd, q):
+    """Every placement of q hotkeys, as complete boards."""
+    slots = [("occupied", i) for i in range(len(board))]
+    used_top = sum(1 for s, a, b in board if s == rnd.omega and a + b > 0)
+    slots += [("fresh_top", j)
+              for j in range(min(max(0, rnd.n_top - used_top), q))]
+    used_spare = sum(1 for s, a, b in board if s == rnd.omega - 1 and a + b > 0)
+    slots += [("fresh_spare", j)
+              for j in range(min(max(0, rnd.n_spare - used_spare), q))]
+    for combo in itertools.combinations_with_replacement(range(len(slots)), q):
+        trial = [list(e) for e in board]
+        extra = {}
+        for i in combo:
+            kind, j = slots[i]
+            if kind == "occupied":
+                trial[j][2] += 1
+            else:
+                extra[(kind, j)] = extra.get((kind, j), 0) + 1
+        trial = [tuple(e) for e in trial]
+        for (kind, _j), count in extra.items():
+            size = rnd.omega if kind == "fresh_top" else rnd.omega - 1
+            trial.append((size, 0, count))
+        yield trial
+
+
 def main():
     """Runs every check and prints the results."""
     print("scoring vs fleet_sim        : max disagreement %.3g"
@@ -149,6 +201,11 @@ def main():
     bad, total, worst = check_prior_occupancy(solver=native.best_response)
     print("C++ on boards with prior B  : %d/%d below, worst %.9f"
           % (bad, total, worst))
+    bad, total, worst = check_weighted()
+    print("weighted best response      : %d/%d below, worst %.9f"
+          % (bad, total, worst))
+    check_maximin()
+    check_bayes()
     return 0
 
 
@@ -219,6 +276,100 @@ def check_prior_occupancy(trials=400, seed=77, solver=None):
             bad += 1
             worst = max(worst, reference - (mean_b - mean_a))
     return bad, total, worst
+
+
+
+
+def _partitions(total, slots):
+    """Every multiset of positive counts summing to total, at most slots parts."""
+    if total == 0:
+        yield ()
+        return
+    if slots == 0:
+        return
+    for head in range(1, total + 1):
+        for rest in _partitions(total - head, slots - 1):
+            if not rest or head >= rest[0]:
+                yield (head,) + rest
+
+
+def _all_a_boards(rnd, q):
+    for at_omega in range(q + 1):
+        rest = q - at_omega
+        for top in _partitions(at_omega, rnd.n_top):
+            for spare in _partitions(rest, rnd.n_spare):
+                board = ([(rnd.omega, c, 0) for c in top]
+                         + [(rnd.omega - 1, c, 0) for c in spare])
+                if board:
+                    yield board
+
+
+def check_maximin(trials=400, seed=17):
+    """Compares the maximin solver against every A board on small instances."""
+    import native
+    import strategies
+    rng = random.Random(seed)
+    worst = worst_start = 0.0
+    below = below_start = 0
+    for _ in range(trials):
+        rnd = _fake_round(rng)
+        rnd.n_top = rng.randint(1, 4)
+        rnd.n_spare = rng.randint(0, 4)
+        q_a = rng.randint(1, 7)
+        q_b = rng.randint(1, 6)
+        rnd.fleet_a = rng.randint(q_a, 30)
+        rnd.fleet_b = rng.randint(q_b, 30)
+        w_a, w_b = q_a / float(rnd.fleet_a), q_b / float(rnd.fleet_b)
+
+        def value(board):
+            _t, ma, mb = native.best_response(board, rnd, q_b)
+            return w_a * ma - w_b * mb
+
+        best = max(value(b) for b in _all_a_boards(rnd, q_a))
+        gap = best - value(native.maximin(rnd, q_a, q_b))
+        if gap > 1e-9:
+            below += 1
+            worst = max(worst, gap)
+        start = best - max(value(b) for b in strategies.a_candidates(rnd, q_a))
+        if start > 1e-9:
+            below_start += 1
+            worst_start = max(worst_start, start)
+    print("maximin vs every A board    : %d/%d below, worst %.9f"
+          % (below, trials, worst))
+    print("  (family start, no climb)  : %d/%d below, worst %.9f"
+          % (below_start, trials, worst_start))
+
+
+def check_bayes(trials=150, seed=29):
+    """Compares the bayes solver against every A board under its own objective."""
+    import native
+    import strategies
+    rng = random.Random(seed)
+    worst = 0.0
+    below = 0
+    for _ in range(trials):
+        rnd = _fake_round(rng)
+        rnd.n_top = rng.randint(1, 4)
+        rnd.n_spare = rng.randint(0, 4)
+        q_a = rng.randint(1, 6)
+        rnd.fleet_a = rng.randint(q_a, 30)
+        rnd.fleet_b = rng.randint(4, 30)
+        posterior = strategies._posterior(rnd)
+
+        def value(board):
+            total = 0.0
+            for k, w in posterior:
+                _t, ma, mb = native.best_response(board, rnd, k)
+                total += w * (q_a / rnd.fleet_a * ma - k / rnd.fleet_b * mb)
+            return total
+
+        best = max(value(b) for b in _all_a_boards(rnd, q_a))
+        gap = best - value(native.bayes(rnd, q_a, posterior))
+        if gap > 1e-9:
+            below += 1
+            worst = max(worst, gap)
+    print("bayes vs every A board      : %d/%d below, worst %.9f"
+          % (below, trials, worst))
 
 
 if __name__ == "__main__":

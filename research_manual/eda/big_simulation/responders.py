@@ -23,6 +23,22 @@ def full(board, rnd, q, rng):
     return native.best_response(board, rnd, q)
 
 
+@responder("full_pooled")
+def full_pooled(board, rnd, q, rng):
+    """Answers maximising the POOLED objective the sweep actually scores.
+
+    pooled_B - pooled_A weights each round by its answer count, so the
+    per-round objective is q_b*mean_B - q_a*mean_A. Answering with the
+    unweighted margin instead optimises a different quantity than the one
+    reported, which made a first player appear to win from the minority.
+    """
+    # pooled_B - pooled_A weights by q/sum(q), and sum(q) is proportional to the
+    # FLEET size, so the per-round weights are q_a/fleet_a and q_b/fleet_b.
+    # Using q_a and q_b raw is only correct when the fleets are equal.
+    return native.best_response_weighted(
+        board, rnd, q, rnd.q_a / float(rnd.fleet_a), q / float(rnd.fleet_b))
+
+
 @responder("partial")
 def partial(board, rnd, q, rng):
     """Answers knowing only the occupancy multiset, then places at random."""

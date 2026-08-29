@@ -17,10 +17,14 @@ def run_split(g, o, strategy, responder, seed, all_rounds):
     means_a, means_b = [], []
     for rnd in all_rounds:
         q_a, q_b = rounds_module.split_queries(rnd, g, o)
-        rnd.q_a, rnd.q_b = q_a, q_b
+        rnd.q_a = q_a
         rnd.fleet_a, rnd.fleet_b = g, o
+        rnd.q_b_oracle = q_b
+        if hasattr(rnd, "q_b"):
+            del rnd.q_b
         board = commit(rnd, q_a, score)
         assert board
+        rnd.q_b = q_b
         _trial, mean_a, mean_b = reply(board, rnd, q_b, reply_rng)
         means_a.append(mean_a)
         means_b.append(mean_b)

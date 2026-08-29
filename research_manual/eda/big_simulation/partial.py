@@ -146,24 +146,35 @@ def _fresh_plans(view, sizes, n_fresh, stack, cap):
             yield [(s, stack) for s, c in zip(sizes, combo) for _ in range(c)]
 
 
-def best_response(view, difficulty, q, omega, max_fresh_stack=3):
-    """Returns the expected gap and plan, searching every multiset."""
-    return _search(view, difficulty, q, omega, max_fresh_stack, None, 0, 0)
+def best_response(view, difficulty, q, omega, max_fresh_stack=None):
+    """Returns the expected gap and plan, searching every multiset.
+
+    Exhaustive: no stack cap, no width grid and no shape family. This is the
+    reference the fast responder is checked against, so it must not prune.
+    """
+    return _search(view, difficulty, q, omega, max_fresh_stack or q, None, 0, 0,
+                   prune=False)
 
 
 def best_response_fast(view, difficulty, q, omega, max_fresh_stack=3,
-                       j_cap=6, fresh_cap=3):
-    """Returns the same as best_response, restricted to even spreads."""
-    return _search(view, difficulty, q, omega, max_fresh_stack, "even", j_cap,
-                   fresh_cap)
+                       j_cap=0, fresh_cap=3, head_cap=8):
+    """Returns the same as best_response, restricted to a two-parameter family.
+
+    Even spreads alone cannot express a skewed assignment such as [4,1,1,1,1,1],
+    which is the exhaustive optimum on real views often enough to matter, so the
+    family is even-over-j plus one deepened head.
+    """
+    return _search(view, difficulty, q, omega, max_fresh_stack, "head", j_cap,
+                   fresh_cap, head_cap=head_cap)
 
 
 def _search(view, difficulty, q, omega, max_fresh_stack, shape, j_cap,
-            fresh_cap):
+            fresh_cap, weighted=True, prune=True, head_cap=0):
     assert q > 0
     sizes = sorted(view, reverse=True)
     occupied = [c for s in sizes for c in view[s]["counts"]]
-    if occupied and sum(1 for c in occupied if c <= 1) > q:
+    held_a = sum(occupied)
+    if prune and occupied and sum(1 for c in occupied if c <= 1) > q:
         max_fresh_stack = 1
     active = [s for s in sizes if view[s]["counts"]]
 
@@ -180,20 +191,35 @@ def _search(view, difficulty, q, omega, max_fresh_stack, shape, j_cap,
                 continue
             for fresh_plan in _fresh_plans(view, sizes, n_fresh, stack,
                                            fresh_cap):
-                for combo in _assignments(view, sizes, split, shape, j_cap):
+                for combo in _assignments(view, sizes, split, shape, j_cap,
+                                          head_cap):
                     plan = {"fresh": fresh_plan}
                     for size, assign in zip(sizes, combo):
                         if assign is not None:
                             plan[size] = (view[size]["counts"], list(assign))
                     mean_a, mean_b = native.expected_scores(plan, difficulty,
                                                             omega)
-                    if best is None or (mean_b - mean_a) > best[0] + 1e-12:
-                        best = (mean_b - mean_a, plan, mean_a, mean_b)
+                    if weighted:
+                        objective = q * mean_b - held_a * mean_a
+                    else:
+                        objective = mean_b - mean_a
+                    if best is None or objective > best[0] + 1e-12:
+                        best = (objective, plan, mean_a, mean_b)
     assert best is not None
     return best
 
 
-def _assignments(view, sizes, split, shape, j_cap):
+def _heads(budget, j, cap):
+    """Extra depth to pile on one clique, on top of an even spread over j."""
+    high = budget - j
+    if high <= 0:
+        return (0,)
+    if cap <= 0 or high + 1 <= cap:
+        return range(high + 1)
+    return sorted({high * i // (cap - 1) for i in range(cap)})
+
+
+def _assignments(view, sizes, split, shape, j_cap, head_cap=0):
     per_class = []
     for size, budget in zip(sizes, split):
         slots = len(view[size]["counts"])
@@ -204,14 +230,30 @@ def _assignments(view, sizes, split, shape, j_cap):
         if shape is None:
             per_class.append(list(_multisets(budget, slots)))
             continue
+        seen = set()
         options = []
         for j in _j_grid(slots, budget, j_cap) if budget else (0,):
             if j == 0:
                 options.append([0] * slots)
                 continue
-            base, extra = divmod(budget, j)
-            options.append(sorted([base + 1] * extra + [base] * (j - extra)
-                                  + [0] * (slots - j), reverse=True))
+            heads = _heads(budget, j, head_cap) if shape == "head" else (None,)
+            for head in heads:
+                if head is None:
+                    base, extra = divmod(budget, j)
+                    counts = [base + 1] * extra + [base] * (j - extra)
+                else:
+                    rest = budget - 1 - head
+                    if rest < j - 1:
+                        continue
+                    base, extra = divmod(rest, j - 1) if j > 1 else (0, 0)
+                    counts = ([1 + head] + [base + 1] * extra
+                              + [base] * (j - 1 - extra))
+                counts = sorted(counts + [0] * (slots - j), reverse=True)
+                key = tuple(counts)
+                if key in seen:
+                    continue
+                seen.add(key)
+                options.append(counts)
         per_class.append(options)
     return itertools.product(*per_class)
 

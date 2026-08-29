@@ -106,7 +106,7 @@ def _gain(board, kind, i, take, xmin, q, held_a):
         return xmin / float(q) if take else 0.0
     held = board[i][1] + board[i][2]
     total = held + take
-    return (xmin * take / float(total) / float(q)
+    return (xmin * (board[i][2] + take) / float(total) / float(q)
             - xmin * board[i][1] / float(total) / float(held_a))
 
 

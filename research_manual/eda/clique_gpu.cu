@@ -85,6 +85,8 @@ enum {
     // the pair below counts only results at the current target.
     C_DUPMAX,
     C_NEWMAX,
+    C_OVF_TOP,    // omega partition full
+    C_OVF_SPARE,  // omega-1 partition full
     C_NCTR = 16
 };
 
@@ -159,9 +161,22 @@ struct Pool {
     u32 *res_hits;      // jobs that landed on this clique: its BASIN SIZE
     u32 fpcap;          // power of two
     int *res_size;
-    short *res_vert;    // res_cap rows of SN83_KMAX
-    u32 *n_res;
-    u32 res_cap;
+    short *res_vert;    // res_total rows of SN83_KMAX
+    // Two partitions, not one queue.  A single insertion-order table lets the
+    // omega-1 spares -- which arrive in their thousands -- consume every slot
+    // and leave omega-cliques found later with nowhere to go.
+    //
+    // A result goes to the half chosen by its SIZE PARITY, not by whether it is
+    // currently at the target.  omega and omega-1 differ by one, so they always
+    // have opposite parity and always land in different halves -- and they keep
+    // doing so when a larger clique arrives and the target moves.  Splitting by
+    // target instead would put the old omega and the new omega in the same half
+    // and force a rescan on every improvement; parity costs nothing and never
+    // needs one.  Stale entries two sizes down share a half with the new target
+    // and simply age out as dead slots; the host filters on size regardless.
+    u32 *n_res;         // [0] even-sized results, [1] odd-sized
+    u32 res_cap;        // rows PER PARTITION
+    u32 res_total;      // 2 * res_cap
     int *target;        // largest clique seen so far
     u32 *epoch;
     int *done_flag;
@@ -994,10 +1009,14 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
                 // A starved warp escalates to more seeds at LEVEL 1, not to
                 // level 2: a level-1 seed still aims at omega, level 2 aims
                 // below it.  Same reason fleet_solver settled on BAN_N = 1.
-                u32 nres = atomicAdd(p.n_res, 0u);
-                if (nres > p.res_cap) nres = p.res_cap;
+                u32 ntop = atomicAdd(&p.n_res[0], 0u);
+                u32 nspare = atomicAdd(&p.n_res[1], 0u);
+                if (ntop > p.res_cap) ntop = p.res_cap;
+                if (nspare > p.res_cap) nspare = p.res_cap;
+                u32 nres = ntop + nspare;
                 if (nres > 0u) {
-                    u32 which = (u32)(mix64(spin) % nres);
+                    u32 pick = (u32)(mix64(spin) % nres);
+                    u32 which = pick < ntop ? pick : p.res_cap + (pick - ntop);
                     spin += 0x9E3779B97F4A7C15ull;
                     int sz = p.res_size[which];
                     if (sz > 0) {
@@ -1070,8 +1089,10 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
                 if (r == 1) {
                     atomicAdd(&p.ctr[C_NEW], 1ull);
                     if (o.size >= cur) atomicAdd(&p.ctr[C_NEWMAX], 1ull);
-                    u32 slot = atomicAdd(p.n_res, 1u);
-                    if (slot < p.res_cap) {
+                    const int part = o.size & 1;
+                    u32 idx = atomicAdd(&p.n_res[part], 1u);
+                    if (idx < p.res_cap) {
+                        u32 slot = (u32)part * p.res_cap + idx;
                         p.res_size[slot] = o.size;
                         p.res_hits[slot] = 1u;
                         __threadfence();
@@ -1079,8 +1100,10 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
                         s.res_slot = (int)slot;
                         s.keep_flag = 1;
                     } else {
-                        atomicSub(p.n_res, 1u);
+                        atomicSub(&p.n_res[part], 1u);
                         atomicAdd(&p.ctr[C_OVERFLOW], 1ull);
+                        atomicAdd(&p.ctr[(o.size >= cur) ? C_OVF_TOP : C_OVF_SPARE],
+                                  1ull);
                     }
                 } else if (r == 0) {
                     atomicAdd(&p.ctr[C_DUP], 1ull);
@@ -1088,7 +1111,7 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
                     u32 rs = p.fp_res[tslot];
                     // 0xFFFFFFFF: the winner has not published its row yet, and
                     // losing that one count is harmless
-                    if (rs < p.res_cap) atomicAdd(&p.res_hits[rs], 1u);
+                    if (rs < p.res_total) atomicAdd(&p.res_hits[rs], 1u);
                 }
             }
             if (o.size < cur) {
@@ -1188,8 +1211,10 @@ __global__ void seed_kernel(Cfg cfg, Queues q, Pool p, const short *verts,
     atomicMax(p.target, size);
     u32 tslot = 0u;
     if (pool_insert(p, h, &tslot) == 1) {
-        u32 slot = atomicAdd(p.n_res, 1u);
-        if (slot < p.res_cap) {
+        const int part = size & 1;
+        u32 idx = atomicAdd(&p.n_res[part], 1u);
+        if (idx < p.res_cap) {
+            u32 slot = (u32)part * p.res_cap + idx;
             p.res_size[slot] = size;
             p.res_hits[slot] = 1u;
             p.fp_res[tslot] = slot;
@@ -1197,7 +1222,7 @@ __global__ void seed_kernel(Cfg cfg, Queues q, Pool p, const short *verts,
                 p.res_vert[(size_t)slot * SN83_KMAX + i] = verts[i];
             atomicAdd(&p.ctr[C_NEW], 1ull);
         } else {
-            atomicSub(p.n_res, 1u);
+            atomicSub(&p.n_res[part], 1u);
         }
     }
     (void)cfg;
@@ -1620,6 +1645,7 @@ Pool poolof(const Handle &h) {
     p.res_vert = h.d_res_vert;
     p.n_res = h.d_n_res;
     p.res_cap = h.res_cap;
+    p.res_total = 2u * h.res_cap;
     p.target = h.d_target;
     p.epoch = h.d_epoch;
     p.done_flag = h.d_done;
@@ -1782,7 +1808,7 @@ void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
         return fail("cudaHostGetDevicePointer stop");
 
     h->q_cap = 1u << 16;
-    h->res_cap = 1u << 13;
+    h->res_cap = 1u << 12;      // per partition; 2 * res_cap rows in total
     h->fpcap = 1u << 17;
     if ((e = cudaMalloc(&h->d_ring, (size_t)SN83_NLEV * h->q_cap * sizeof(Job))) !=
         cudaSuccess)
@@ -1791,16 +1817,18 @@ void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
         return fail("cudaMalloc qcnt");
     if ((e = cudaMalloc(&h->d_fp, (size_t)h->fpcap * sizeof(u64))) != cudaSuccess)
         return fail("cudaMalloc fp");
-    if ((e = cudaMalloc(&h->d_res_size, (size_t)h->res_cap * sizeof(int))) != cudaSuccess)
+    if ((e = cudaMalloc(&h->d_res_size,
+                        (size_t)2 * h->res_cap * sizeof(int))) != cudaSuccess)
         return fail("cudaMalloc res_size");
     if ((e = cudaMalloc(&h->d_res_vert,
-                        (size_t)h->res_cap * SN83_KMAX * sizeof(short))) != cudaSuccess)
+                        (size_t)2 * h->res_cap * SN83_KMAX * sizeof(short))) != cudaSuccess)
         return fail("cudaMalloc res_vert");
-    if ((e = cudaMalloc(&h->d_res_hits, (size_t)h->res_cap * sizeof(u32))) != cudaSuccess)
+    if ((e = cudaMalloc(&h->d_res_hits,
+                        (size_t)2 * h->res_cap * sizeof(u32))) != cudaSuccess)
         return fail("cudaMalloc res_hits");
     if ((e = cudaMalloc(&h->d_fp_res, (size_t)h->fpcap * sizeof(u32))) != cudaSuccess)
         return fail("cudaMalloc fp_res");
-    if ((e = cudaMalloc(&h->d_n_res, sizeof(u32))) != cudaSuccess)
+    if ((e = cudaMalloc(&h->d_n_res, 2 * sizeof(u32))) != cudaSuccess)
         return fail("cudaMalloc n_res");
     if ((e = cudaMalloc(&h->d_target, sizeof(int))) != cudaSuccess)
         return fail("cudaMalloc target");
@@ -2134,13 +2162,13 @@ int sn83_gpu_harvest(void *hv, double time_limit, unsigned long long seed,
 
     cudaMemset(h->d_qcnt, 0, 3 * SN83_NLEV * sizeof(u32));
     cudaMemset(h->d_fp, 0, (size_t)h->fpcap * sizeof(u64));
-    cudaMemset(h->d_n_res, 0, sizeof(u32));
+    cudaMemset(h->d_n_res, 0, 2 * sizeof(u32));
     // Zeroed too, not just n_res: a synthesizing warp may read a slot another
     // warp reserved but has not filled, and a stale size would send it reading
     // uninitialised vertices.  Bans are range-checked, so this was never an
     // out-of-bounds read -- but a ban drawn from garbage is a wasted job.
-    cudaMemset(h->d_res_size, 0, (size_t)h->res_cap * sizeof(int));
-    cudaMemset(h->d_res_hits, 0, (size_t)h->res_cap * sizeof(u32));
+    cudaMemset(h->d_res_size, 0, (size_t)2 * h->res_cap * sizeof(int));
+    cudaMemset(h->d_res_hits, 0, (size_t)2 * h->res_cap * sizeof(u32));
     cudaMemset(h->d_fp_res, 0xFF, (size_t)h->fpcap * sizeof(u32));
     cudaMemset(h->d_target, 0, sizeof(int));
     cudaMemset(h->d_epoch, 0, sizeof(u32));
@@ -2199,22 +2227,52 @@ int sn83_gpu_harvest(void *hv, double time_limit, unsigned long long seed,
     CK(cudaStreamSynchronize(h->stream));
     CK(cudaGetLastError());
 
-    u32 n_res = 0;
-    CK(cudaMemcpy(&n_res, h->d_n_res, sizeof(u32), cudaMemcpyDeviceToHost));
-    if (n_res > h->res_cap) n_res = h->res_cap;
-    int take = (int)n_res;
-    if (take > max_out) take = max_out;
+    // Halves are keyed by size parity, so which one holds omega is decided by
+    // the final target.  Emit that half first: a caller truncating with a small
+    // max_out then loses spares, never omega-cliques.
+    u32 nres[2] = {0u, 0u};
+    int target = 0;
+    CK(cudaMemcpy(nres, h->d_n_res, 2 * sizeof(u32), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(&target, h->d_target, sizeof(int), cudaMemcpyDeviceToHost));
+    if (nres[0] > h->res_cap) nres[0] = h->res_cap;
+    if (nres[1] > h->res_cap) nres[1] = h->res_cap;
+    const int p_top = target & 1;
+    const int p_spare = p_top ^ 1;
+    int take_top = (int)nres[p_top];
+    if (take_top > max_out) take_top = max_out;
+    int take_spare = (int)nres[p_spare];
+    if (take_spare > max_out - take_top) take_spare = max_out - take_top;
+    if (take_spare < 0) take_spare = 0;
+    int take = take_top + take_spare;
     if (take > 0) {
         std::vector<short> verts((size_t)take * SN83_KMAX);
-        CK(cudaMemcpy(out_size, h->d_res_size, (size_t)take * sizeof(int),
-                      cudaMemcpyDeviceToHost));
-        CK(cudaMemcpy(&verts[0], h->d_res_vert, verts.size() * sizeof(short),
-                      cudaMemcpyDeviceToHost));
+        if (take_top > 0) {
+            CK(cudaMemcpy(out_size, h->d_res_size + (size_t)p_top * h->res_cap,
+                          (size_t)take_top * sizeof(int), cudaMemcpyDeviceToHost));
+            CK(cudaMemcpy(&verts[0],
+                          h->d_res_vert + (size_t)p_top * h->res_cap * SN83_KMAX,
+                          (size_t)take_top * SN83_KMAX * sizeof(short),
+                          cudaMemcpyDeviceToHost));
+        }
+        if (take_spare > 0) {
+            CK(cudaMemcpy(out_size + take_top,
+                          h->d_res_size + (size_t)p_spare * h->res_cap,
+                          (size_t)take_spare * sizeof(int), cudaMemcpyDeviceToHost));
+            CK(cudaMemcpy(&verts[(size_t)take_top * SN83_KMAX],
+                          h->d_res_vert + (size_t)p_spare * h->res_cap * SN83_KMAX,
+                          (size_t)take_spare * SN83_KMAX * sizeof(short),
+                          cudaMemcpyDeviceToHost));
+        }
         for (size_t i = 0; i < verts.size(); ++i) out_vert[i] = verts[i];
         if (out_hits) {
             std::vector<u32> hits((size_t)take);
-            CK(cudaMemcpy(&hits[0], h->d_res_hits, (size_t)take * sizeof(u32),
-                          cudaMemcpyDeviceToHost));
+            if (take_top > 0)
+                CK(cudaMemcpy(&hits[0], h->d_res_hits + (size_t)p_top * h->res_cap,
+                              (size_t)take_top * sizeof(u32), cudaMemcpyDeviceToHost));
+            if (take_spare > 0)
+                CK(cudaMemcpy(&hits[take_top],
+                              h->d_res_hits + (size_t)p_spare * h->res_cap,
+                              (size_t)take_spare * sizeof(u32), cudaMemcpyDeviceToHost));
             for (int i = 0; i < take; ++i) out_hits[i] = (int)hits[i];
         }
     }

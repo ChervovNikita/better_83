@@ -17,12 +17,15 @@ def selection_p(difficulty):
 def estimate_q_b(rnd):
     """A's estimate of how many answers the opponent submits.
 
-    Uses only what A can see at submit time: its own queried count, and the
-    difficulty, which the vertex count determines exactly. The validator queries
-    p(difficulty) * M hotkeys in total and q_a of them are A's.
+    The validator queries every eligible miner independently with the same
+    probability, so the opponent's count is Binomial(fleet_b, p) and A's own
+    count carries no information about it. The mean is the estimate; using
+    p * METAGRAPH - q_a instead injects q_a's noise for nothing and measured
+    23% relative error against 12% for this. Zero is a legal estimate: at the
+    lopsided splits p * fleet_b rounds to 0, and flooring at 1 made A defend
+    against an opponent it does not expect to face.
     """
-    total = int(round(selection_p(rnd.difficulty) * METAGRAPH))
-    return max(1, total - rnd.q_a)
+    return max(0, int(round(selection_p(rnd.difficulty) * rnd.fleet_b)))
 
 
 def strategy(name):
@@ -111,8 +114,50 @@ def solo(rnd, q, score):
 
 @strategy("maximin_oracle")
 def maximin_oracle(rnd, q, score):
-    """Upper bound only: picks the split knowing the opponent's true count."""
-    return _maximin(rnd, q, rnd.q_b)
+    """Upper bound only: reads q_b_oracle, which a real miner cannot observe."""
+    return _maximin(rnd, q, rnd.q_b_oracle)
+
+
+def _posterior(rnd, tail=1e-4, buckets=9):
+    """Binomial(fleet_b, p) support and weights, trimmed to the useful mass."""
+    n = rnd.fleet_b
+    p = selection_p(rnd.difficulty)
+    mean = n * p
+    sd = math.sqrt(max(1e-9, n * p * (1.0 - p)))
+    lo = max(1, int(mean - 4 * sd))
+    hi = min(n, int(mean + 4 * sd) + 1)
+    out = []
+    total = 0.0
+    for k in range(lo, hi + 1):
+        w = math.comb(n, k) * (p ** k) * ((1.0 - p) ** (n - k))
+        if w > tail:
+            out.append((k, w))
+            total += w
+    assert out
+    out = [(k, w / total) for k, w in out]
+    if buckets <= 0 or len(out) <= buckets:
+        return out
+    step = len(out) / float(buckets)
+    merged = []
+    for i in range(buckets):
+        chunk = out[int(i * step):int((i + 1) * step)] or [out[-1]]
+        mass = sum(w for _k, w in chunk)
+        centre = int(round(sum(k * w for k, w in chunk) / mass))
+        merged.append((max(1, centre), mass))
+    total = sum(w for _k, w in merged)
+    return [(k, w / total) for k, w in merged]
+
+
+@strategy("bayes")
+def bayes(rnd, q, score):
+    """Maximises the expected q-weighted margin over A's posterior for q_b.
+
+    A dominates on emissions when sum(q_a*mean_A) >= sum(q_b*mean_B), so at the
+    crossover the per-round objective is q_a*mean_A - q_b*mean_B, and q_b is a
+    known Binomial rather than a point estimate.
+    """
+    import native
+    return native.bayes(rnd, q, _posterior(rnd))
 
 
 @strategy("maximin")
@@ -123,27 +168,52 @@ def maximin(rnd, q, score):
 
 def _maximin(rnd, q, q_b):
     import native
-    if rnd.n_top >= q:
-        return _board(rnd.omega, [1] * q, [])
-    best = None
-    for at_omega in range(min(rnd.n_top, q), q + 1):
+    return native.maximin(rnd, q, q_b)
+
+
+def a_candidates(rnd, q):
+    """A's board family: every (split, width) pair on the width/minimum frontier.
+
+    A's diversity term depends on its own board only through the number of
+    distinct cliques occupied and the smallest count on any of them, so for a
+    target minimum m the best board is the widest spread whose counts all reach
+    m. Sweeping m therefore covers the frontier.
+    """
+    seen = set()
+    out = []
+    for at_omega in range(q + 1):
         rest = q - at_omega
         if at_omega and not rnd.n_top:
             continue
         if rest and not rnd.n_spare:
             continue
-        board = []
-        if at_omega:
-            board += [(rnd.omega, c, 0)
-                      for c in _spread(at_omega, min(rnd.n_top, at_omega))]
-        if rest:
-            board += [(rnd.omega - 1, c, 0)
-                      for c in _spread(rest, min(rnd.n_spare, rest))]
-        board = [b for b in board if b[1] > 0]
-        if not board:
-            continue
+        for m in range(1, q + 1):
+            j_top = max(1, min(rnd.n_top, at_omega // m)) if at_omega else 0
+            j_spare = max(1, min(rnd.n_spare, rest // m)) if rest else 0
+            if not j_top and not j_spare:
+                continue
+            if (at_omega, j_top, j_spare) in seen:
+                continue
+            seen.add((at_omega, j_top, j_spare))
+            board = []
+            if j_top:
+                board += [(rnd.omega, c, 0) for c in _spread(at_omega, j_top)]
+            if j_spare:
+                board += [(rnd.omega - 1, c, 0) for c in _spread(rest, j_spare)]
+            board = [b for b in board if b[1] > 0]
+            if board:
+                out.append(board)
+    return out
+
+
+def _maximin_python(rnd, q, q_b):
+    import native
+    w_a, w_b = q / float(rnd.fleet_a), q_b / float(rnd.fleet_b)
+    best = None
+    for board in a_candidates(rnd, q):
         _t, mean_a, mean_b = native.best_response(board, rnd, q_b)
-        if best is None or (mean_a - mean_b) > best[0] + 1e-12:
-            best = (mean_a - mean_b, board)
+        obj = w_a * mean_a - w_b * mean_b
+        if best is None or obj > best[0] + 1e-12:
+            best = (obj, board)
     assert best is not None
     return best[1]

@@ -31,6 +31,11 @@ _lib.bs_best_response.argtypes = [
 _lib.bs_best_response.restype = ctypes.c_double
 
 
+_OUT_BOARD = (ctypes.c_int * (3 * _MAX_BOARD))()
+_OUT_N = ctypes.c_int(0)
+_OUT_MEANS = (ctypes.c_double * 2)()
+
+
 def score(board, difficulty):
     """Returns the mean reward of each player."""
     flat = []
@@ -53,16 +58,13 @@ def best_response(board, rnd, q):
     for size, n_a, n_b in board:
         flat += [size, n_a, n_b]
     buf = (ctypes.c_int * len(flat))(*flat)
-    out_board = (ctypes.c_int * (3 * _MAX_BOARD))()
-    out_n = ctypes.c_int(0)
-    out_means = (ctypes.c_double * 2)()
     _lib.bs_best_response(buf, len(board), q, rnd.omega, rnd.n_top,
-                          rnd.n_spare, rnd.difficulty, out_board,
-                          ctypes.byref(out_n), out_means)
-    n = out_n.value
-    trial = [(out_board[3 * i], out_board[3 * i + 1], out_board[3 * i + 2])
+                          rnd.n_spare, rnd.difficulty, _OUT_BOARD,
+                          ctypes.byref(_OUT_N), _OUT_MEANS)
+    n = _OUT_N.value
+    trial = [(_OUT_BOARD[3 * i], _OUT_BOARD[3 * i + 1], _OUT_BOARD[3 * i + 2])
              for i in range(n)]
-    return trial, out_means[0], out_means[1]
+    return trial, _OUT_MEANS[0], _OUT_MEANS[1]
 
 
 _LIBP = os.path.join(_HERE, "libbsp.so")
@@ -98,3 +100,65 @@ def expected_scores(plan, difficulty, omega):
                        _ints([d for _s, d in fresh]), len(fresh),
                        omega, difficulty, out)
     return out[0], out[1]
+
+
+_lib.bs_maximin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                            ctypes.c_int, ctypes.c_int, ctypes.c_double,
+                            ctypes.c_double, ctypes.c_double,
+                            ctypes.POINTER(ctypes.c_int),
+                            ctypes.POINTER(ctypes.c_int)]
+_lib.bs_maximin.restype = ctypes.c_double
+
+
+def maximin(rnd, q_a, q_b):
+    """Returns the first player's board maximising the pooled margin."""
+    out_board = (ctypes.c_int * (3 * _MAX_BOARD))()
+    out_n = ctypes.c_int(0)
+    _lib.bs_maximin(q_a, q_b, rnd.omega, rnd.n_top, rnd.n_spare,
+                    rnd.difficulty, float(rnd.fleet_a), float(rnd.fleet_b),
+                    out_board, ctypes.byref(out_n))
+    return [(out_board[3 * i], out_board[3 * i + 1], out_board[3 * i + 2])
+            for i in range(out_n.value)]
+
+
+_lib.bs_bayes.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int),
+                          ctypes.POINTER(ctypes.c_double), ctypes.c_int,
+                          ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                          ctypes.c_double, ctypes.c_double, ctypes.c_double,
+                          ctypes.POINTER(ctypes.c_int),
+                          ctypes.POINTER(ctypes.c_int)]
+_lib.bs_bayes.restype = ctypes.c_double
+
+
+def bayes(rnd, q_a, posterior):
+    """Returns the board maximising the expected q-weighted margin."""
+    ks = (ctypes.c_int * len(posterior))(*[k for k, _w in posterior])
+    ws = (ctypes.c_double * len(posterior))(*[w for _k, w in posterior])
+    _lib.bs_bayes(q_a, ks, ws, len(posterior), rnd.omega, rnd.n_top,
+                  rnd.n_spare, rnd.difficulty, float(rnd.fleet_a),
+                  float(rnd.fleet_b), _OUT_BOARD, ctypes.byref(_OUT_N))
+    return [(_OUT_BOARD[3 * i], _OUT_BOARD[3 * i + 1], _OUT_BOARD[3 * i + 2])
+            for i in range(_OUT_N.value)]
+
+
+_lib.bs_best_response_w.argtypes = [
+    ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int, ctypes.c_double, ctypes.c_double,
+    ctypes.c_double, ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_double)]
+_lib.bs_best_response_w.restype = ctypes.c_double
+
+
+def best_response_weighted(board, rnd, q, w_a, w_b):
+    """Best response maximising w_b*mean_B - w_a*mean_A."""
+    flat = []
+    for size, n_a, n_b in board:
+        flat += [size, n_a, n_b]
+    buf = (ctypes.c_int * len(flat))(*flat)
+    _lib.bs_best_response_w(buf, len(board), q, rnd.omega, rnd.n_top,
+                            rnd.n_spare, rnd.difficulty, w_a, w_b, _OUT_BOARD,
+                            ctypes.byref(_OUT_N), _OUT_MEANS)
+    n = _OUT_N.value
+    trial = [(_OUT_BOARD[3 * i], _OUT_BOARD[3 * i + 1], _OUT_BOARD[3 * i + 2])
+             for i in range(n)]
+    return trial, _OUT_MEANS[0], _OUT_MEANS[1]

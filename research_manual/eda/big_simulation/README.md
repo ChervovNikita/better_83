@@ -25,6 +25,13 @@ reward distributions.
 
 Writes `sweep_<strategy>_<responder>.json` and four images tagged the same way.
 
+`table.py --g <A's size>` runs one split through both strategies and both
+responders at once, reusing A's board across responders, and writes
+`out/split_<g>.json` with a `(q_a, q_b, mean_a, mean_b)` row per round. The
+answer counts are in the rows because the headline figure is **pooled** —
+`sum(q * mean) / sum(q)`, the share of total reward per answer — and a mean of
+per-round means is a different quantity.
+
 ## Where the rounds come from
 
 Nothing is generated. `rounds.py` reads **938 real rounds** whose cliques the GPU
@@ -58,6 +65,41 @@ median 456, field answers median 54 (range 10–97).
 | `sweep.py` | the split sweep |
 | `plots.py` | the four images |
 | `verify.py` | cross-checks against slower references |
+| `table.py` | one split, both strategies x both responders |
+| `native.cpp` | C++ best response, maximin and bayes |
+| `native_partial.cpp` | C++ expectation over the random matching |
+
+## What is exact and what is not
+
+`verify.py` runs every check below on small instances against brute force.
+
+| check | scope |
+|---|---|
+| `check_scoring` | the scorer against `research/fleet_sim.score_round` |
+| `check_optimal` | B's full-sight response against every reply |
+| `check_partial` | B's fast partial response against every multiset |
+| `check_optimal_grid` | a covered grid of round shapes |
+| `check_prior_occupancy` | boards that already carry B hotkeys |
+| `check_weighted` | the pooled-objective response |
+| `check_maximin` | A's board against **every partition** of its budget |
+| `check_bayes` | the same under A's posterior objective |
+
+Two searches are families, not enumerations, because A's move space is the set
+of partitions of up to 125 hotkeys:
+
+- **A's board** (`native.cpp: a_candidates` + `climb`). The family sweeps the
+  split between the two size classes and, for each target minimum, the widest
+  spread reaching it; steepest ascent over single-hotkey moves then refines it.
+  The family alone is short of the exhaustive optimum on 8/400 small instances
+  (worst 0.090); with the climb it is 0/400. That is evidence, not proof.
+- **B's partial response** (`partial.py: best_response_fast`). Even spreads
+  alone cannot express a skewed assignment like `[4,1,1,1,1,1]`, which is the
+  exhaustive optimum often enough to matter, so the family is even-over-`j`
+  plus one deepened head, with `j` no longer subsampled. 0/160 against the
+  exhaustive reference on medium views, 0/300 on small ones.
+
+`partial.best_response` is the exhaustive reference: no stack cap, no width
+grid, no shape family, no pruning. It is not usable at fleet scale.
 
 ## Adding a strategy or responder
 

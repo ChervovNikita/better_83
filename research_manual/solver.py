@@ -77,6 +77,8 @@ def _dump_pool(uuid, hotkeys, matrix, time_limit, pool, stats, answers):
         "full_hits": [int(h) for h in stats.get("full_hits", [])],
         "n_top_true": int(stats.get("n_top_true", 0)),
         "n_spare_true": int(stats.get("n_spare_true", 0)),
+        "closure_added": int(stats.get("closure_added", 0)),
+        "closure_iters": int(stats.get("closure_iters", 0)),
         "answers": [[int(v) for v in a] for a in answers],
     }
     with _dump_lock, open(POOL_DUMP, "a") as handle:
