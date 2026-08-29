@@ -103,7 +103,7 @@ def marginal(a, n_distinct, m, A):
     return A + expected_share(a, n_distinct, m) - expected_share(a, n_distinct, m - 1)
 
 
-def crowding(hits, a_hat, kappa=0.69, beta=0.0):
+def crowding(hits, a_hat, kappa=0.69, beta=0.0, n_supply=0):
     """Expected field miners on each of our cliques, from their basin sizes.
 
     A4 assumes every clique of a size carries the same F, which lets plan()
@@ -122,11 +122,13 @@ def crowding(hits, a_hat, kappa=0.69, beta=0.0):
     n = len(hits)
     if n == 0:
         return []
+    supply = max(n, int(n_supply))      # the field spreads over what exists
     if beta <= 0.0:
-        return [kappa * a_hat / n] * n
+        return [kappa * a_hat / supply] * n
     w = [(1.0 + max(0, h)) ** (-beta) for h in hits]
     tot = sum(w) or 1.0
-    return [kappa * a_hat * x / tot for x in w]
+    scale = n / float(supply)           # keep the mean at kappa * a_hat / supply
+    return [kappa * a_hat * x * scale / tot for x in w]
 
 
 def greedy_per_clique(items, q):
@@ -164,22 +166,31 @@ def _dup_gain(f, m):
 def _greedy(classes, q):
     """Top-q marginals, which is exactly optimal for fixed A (DERIVATION.md).
 
-    `classes` is [(key, n_distinct, a, A)] -- one entry per size class. Within a
-    class every clique has the same marginal under A4, so greedy round-robins and
-    the allocation is fully described by how many hotkeys each class receives.
+    `classes` is [(key, n_held, n_supply, a, A)] -- one entry per size class.
+    The two counts are not the same number and cannot share one slot:
+
+        n_held    distinct cliques of this class we can actually submit, so it
+                  sets the round-robin -- the m-th hotkey on a clique.
+        n_supply  distinct cliques of this class that EXIST, which is what the
+                  field's answers spread over and so what crowding divides by.
+
+    Passing supply for both prices a spread over cliques we do not hold; the
+    caller then fills from the ones we do and duplicates for free.  Passing held
+    for both divides the field over our pool instead of over the graph, which
+    inflates crowding by the truncation factor.
     """
-    counts = {k: 0 for k, _n, _a, _A in classes}
+    counts = {k: 0 for k, _h, _s, _a, _A in classes}
     total = 0.0
     for _ in range(q):
         best, best_gain = None, None
-        for key, n_distinct, a, A in classes:
-            if n_distinct <= 0:
+        for key, n_held, n_supply, a, A in classes:
+            if n_held <= 0:
                 continue
             taken = counts[key]
-            # round-robin: the next hotkey lands on the least-loaded clique,
-            # which currently holds floor(taken / n_distinct)
-            m = taken // n_distinct + 1
-            gain = marginal(a, n_distinct, m, A)
+            # round-robin: the next hotkey lands on the least-loaded clique we
+            # hold, which currently carries floor(taken / n_held)
+            m = taken // n_held + 1
+            gain = marginal(a, max(1, n_supply), m, A)
             if best_gain is None or gain > best_gain:
                 best, best_gain = key, gain
         if best is None:
@@ -189,47 +200,57 @@ def _greedy(classes, q):
     return counts, total
 
 
-def plan(q, omega, n_top, n_spare, n_others, a_hat, difficulty, b_hat=0):
+def plan(q, omega, n_top, n_spare, n_others, a_hat, difficulty, b_hat=0,
+         held_top=None, held_spare=None):
     """How many hotkeys go to omega, and how many to omega-1.
 
     Enumerates the size split t (A5: opt depends on it), solving each split
     exactly by greedy, and keeps the best.  Returns a Plan whose detail carries
     the per-class counts.
+
+    n_top / n_spare are the SUPPLY -- distinct cliques of each size that exist.
+    held_* are how many we hold and can therefore submit; they default to the
+    supply, which is the right thing only when the pool was not truncated.  The
+    spreads in `detail` are over held_*, so a caller that fills from its pool
+    gets the allocation this actually priced.
     """
     assert q > 0 and omega > 0 and n_top > 0
+    held_top = n_top if held_top is None else held_top
+    held_spare = n_spare if held_spare is None else held_spare
     a_hat = max(0, int(round(a_hat)))
     b_hat = max(0, int(round(b_hat)))
     total_answers = max(1, int(n_others) + q)
 
     best = None
     for t in range(0, q + 1):
-        if t < q and (n_spare <= 0 or omega <= 1):
+        if t < q and (held_spare <= 0 or omega <= 1):
             continue
         at_omega = a_hat + t
         opt_short = (1.0 if at_omega == 0 else
                      math.exp(-(at_omega / float(total_answers)) * omega / (omega - 1.0)))
-        classes = [("top", n_top, a_hat, 1.0 * (1.0 + difficulty))]
-        if n_spare > 0 and omega > 1:
-            classes.append(("spare", n_spare, b_hat, opt_short * (1.0 + difficulty)))
+        classes = [("top", held_top, n_top, a_hat, 1.0 * (1.0 + difficulty))]
+        if held_spare > 0 and omega > 1:
+            classes.append(("spare", held_spare, n_spare, b_hat,
+                            opt_short * (1.0 + difficulty)))
         counts, value = _greedy(classes, q)
         if counts.get("top", 0) != t:
             continue                    # greedy disagrees with this split; skip
         detail = {"t": t, "counts": counts, "opt_short": opt_short,
-                  "top_spread": _spread(counts.get("top", 0), n_top),
-                  "spare_spread": _spread(counts.get("spare", 0), max(1, n_spare))}
+                  "top_spread": _spread(counts.get("top", 0), held_top),
+                  "spare_spread": _spread(counts.get("spare", 0), max(1, held_spare))}
         detail["distinct"] = sum(1 for m in detail["top_spread"] + detail["spare_spread"] if m)
         detail["duplicated"] = sum(m - 1 for m in detail["top_spread"] + detail["spare_spread"] if m > 1)
         if best is None or value / q > best.value:
             best = Plan(t, value / q, detail)
 
     if best is None:                    # no split was self-consistent: take greedy's
-        classes = [("top", n_top, a_hat, 1.0 * (1.0 + difficulty))]
-        if n_spare > 0 and omega > 1:
-            classes.append(("spare", n_spare, b_hat, 1.0 + difficulty))
+        classes = [("top", held_top, n_top, a_hat, 1.0 * (1.0 + difficulty))]
+        if held_spare > 0 and omega > 1:
+            classes.append(("spare", held_spare, n_spare, b_hat, 1.0 + difficulty))
         counts, value = _greedy(classes, q)
         detail = {"t": counts.get("top", 0), "counts": counts, "opt_short": 1.0,
-                  "top_spread": _spread(counts.get("top", 0), n_top),
-                  "spare_spread": _spread(counts.get("spare", 0), max(1, n_spare))}
+                  "top_spread": _spread(counts.get("top", 0), held_top),
+                  "spare_spread": _spread(counts.get("spare", 0), max(1, held_spare))}
         detail["distinct"] = sum(1 for m in detail["top_spread"] + detail["spare_spread"] if m)
         detail["duplicated"] = sum(m - 1 for m in detail["top_spread"] + detail["spare_spread"] if m > 1)
         best = Plan(counts.get("top", 0), value / q, detail)
@@ -237,7 +258,7 @@ def plan(q, omega, n_top, n_spare, n_others, a_hat, difficulty, b_hat=0):
 
 
 def slots_hits(pool, hits, q, n_others, a_hat, difficulty, b_hat=0, beta=0.0,
-               kappa=0.69):
+               kappa=0.69, n_top_supply=0, n_spare_supply=0):
     """Allocation using per-clique crowding estimated from basin size.
 
     Same value function as plan(), but A4 is relaxed: each clique carries its
@@ -258,8 +279,8 @@ def slots_hits(pool, hits, q, n_others, a_hat, difficulty, b_hat=0, beta=0.0,
     spare = sorted(((c, h) for c, h in zip(pool, hits) if len(c) < omega),
                    key=lambda r: (-len(r[0]), -r[1]))
     total = max(1, int(n_others) + q)
-    f_top = crowding([h for _c, h in top], a_hat, kappa, beta)
-    f_spare = crowding([h for _c, h in spare], b_hat, kappa, beta)
+    f_top = crowding([h for _c, h in top], a_hat, kappa, beta, n_top_supply)
+    f_spare = crowding([h for _c, h in spare], b_hat, kappa, beta, n_spare_supply)
 
     best = None
     for t in range(0, q + 1):
@@ -292,15 +313,25 @@ def slots_hits(pool, hits, q, n_others, a_hat, difficulty, b_hat=0, beta=0.0,
     return [list(c) for c in out]
 
 
-def slots(pool, q, n_others, a_hat, difficulty, b_hat=0):
-    """The q cliques to submit, from plan()'s per-class counts."""
+def slots(pool, q, n_others, a_hat, difficulty, b_hat=0, n_top_supply=0,
+          n_spare_supply=0):
+    """The q cliques to submit, from plan()'s per-class counts.
+
+    n_*_supply are how many distinct cliques of each size EXIST as far as the
+    solver could tell, which is what crowding should be divided by.  len(top) is
+    only how many we were handed, and using it inflates the estimate whenever the
+    pool was truncated.
+    """
     assert pool and q > 0
     pool = [tuple(c) for c in pool]
     omega = max(len(c) for c in pool)
     top = [c for c in pool if len(c) == omega]
     spare = sorted((c for c in pool if len(c) < omega), key=len, reverse=True)
-    p = plan(q, omega, len(top), len(spare), n_others, a_hat, difficulty, b_hat)
+    p = plan(q, omega, max(n_top_supply, len(top)),
+             max(n_spare_supply, len(spare)), n_others, a_hat, difficulty, b_hat,
+             held_top=len(top), held_spare=len(spare))
 
+    # plan() already spread over what we hold, so the fill is its own allocation.
     out = []
     for c, m in zip(top, p.detail["top_spread"]):
         out.extend([c] * m)

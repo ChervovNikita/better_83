@@ -145,9 +145,13 @@ def main():
         spare = [tuple(c) for c in cached["spare"]]
         if not field or not top:
             continue
-        pool = top + spare
+        # solve_many returns at most k omega-cliques plus k spares, so a picker
+        # measured on the full cache is measured in a regime it never sees. Trim
+        # to match, and keep the TRUE counts for the crowding model.
+        n_top_true, n_spare_true = len(top), len(spare)
         p = 1.0 - np.exp(-max(0.0, np.sqrt(2.5) - rec["difficulty"] - 0.5))
         q = max(1, int(round(args.fleet * p)))
+        pool = top[:q] + spare[:q]
 
         matrix = codec.decode_matrix(rec["encoded_matrix"])
         graph = _Graph(rec["number_of_nodes"], codec.matrix_to_list(matrix))
@@ -161,7 +165,8 @@ def main():
             "static": pick_static.slots(pool, list(range(q))),
             "value": pick_value.slots(
                 pool, list(range(q)),
-                difficulty=None if args.estimate_difficulty else rec["difficulty"]),
+                difficulty=None if args.estimate_difficulty else rec["difficulty"],
+                n_top_true=n_top_true, n_spare_true=n_spare_true),
             "greedy": strategy.slots(pool, q, len(field),
                                      predict_a(len(top), len(field)),
                                      rec["difficulty"],
@@ -173,7 +178,7 @@ def main():
             a_hat = (0.06 if len(top) <= 5 else 1.00) * n_others
             for b in args.beta:
                 picks["b=%g" % b] = strategy.slots_hits(
-                    pool, list(th) + list(sh), q, n_others, a_hat,
+                    pool, list(th[:q]) + list(sh[:q]), q, n_others, a_hat,
                     rec["difficulty"], b_hat=n_others - a_hat, beta=b)
         row = {}
         for name, sel in picks.items():

@@ -23,19 +23,22 @@ that; this can.
 
 GETTING THE INPUTS
 
-`difficulty` is in the validator's request but not in this signature, so it is
-taken from the environment when the caller can supply it and estimated otherwise:
+difficulty is NOT in the synapse -- production recovers it from the vertex count,
+because problem_selector.py defines four problems whose ranges do not overlap
+(290-300 -> 0.7, 490-500 -> 0.8, 690-700 -> 0.9, 890-900 -> 1.0).  This uses the
+same function, native_algorithm_shim.difficulty_from_n, so the simulator and a
+deployed miner see identical inputs.  Checked exact on all 1100 logged rounds.
 
-    p_hat = q / N_fleet                        q ~ Binomial(N_fleet, p)
-    n_others = p_hat * (n_miners - N_fleet)
-    D_hat = sqrt(1+R) - 0.5 + ln(1 - p_hat)    inverting MinerSelector's p
+Given difficulty, the round size needs no fleet count:
 
-The inversion is exact -- checked against the logged rounds, p=0.317 -> D=0.700
-and p=0.078 -> D=1.000, matching the observed difficulty buckets.  The ESTIMATE
-is not: SD(p_hat) = sqrt(p(1-p)/N_fleet) is 0.063 at N_fleet=40, p=0.2, a 32%
-relative error, and ln(1-p_hat) amplifies it at low p.  Good enough for
-n_others, which enters through a forgiving ratio; poor for D_hat.  Pass the real
-difficulty whenever it is available.
+    n_others = p(difficulty) * n_miners - q
+
+because the validator queries p*M miners and q of them are ours.  That matters:
+a fleet size fluctuates as hotkeys register and deregister, and a stale one
+biases the whole decision through q/n_others = N/(M-N) -- configuring 30 when
+the true fleet is 60 measured as a 0.157 loss, wiping out the gain over
+pick_static.  N_FLEET now survives only as a fallback for callers with neither
+difficulty nor a vertex count.
 """
 
 import hashlib
@@ -103,27 +106,59 @@ def phi(n_top):
     return PHI_LOW if n_top <= PHI_SPLIT else PHI_HIGH
 
 
-def slots(pool, hotkeys, difficulty=None):
-    """The multiset of cliques the fleet submits, one entry per hotkey."""
+def difficulty_from_n(number_of_nodes):
+    """Recover difficulty from the vertex count, as the deployed miner does.
+
+    Mirrors native_algorithm_shim.difficulty_from_n rather than importing it,
+    because that module pulls in bittensor. Exact on all 1100 logged rounds.
+    """
+    n = int(number_of_nodes)
+    if 290 <= n <= 300:
+        return 0.7
+    if 490 <= n <= 500:
+        return 0.8
+    if 690 <= n <= 700:
+        return 0.9
+    if 890 <= n <= 900:
+        return 1.0
+    return 0.8
+
+
+def slots(pool, hotkeys, difficulty=None, n_nodes=None, n_top_true=0,
+          n_spare_true=0):
+    """The multiset of cliques the fleet submits, one entry per hotkey.
+
+    n_top_true / n_spare_true are the distinct counts the solver actually found,
+    BEFORE the pool was truncated to k.  They matter because crowding is
+    a_hat / (number of omega-cliques that exist), and the pool's own length is a
+    truncated proxy that inflates it -- which made the value function duplicate
+    on rounds where duplication is worthless.  Falls back to the pool length when
+    the caller cannot supply them.
+    """
     q = len(hotkeys)
     assert pool and q > 0
     omega = max(len(c) for c in pool)
-    n_top = sum(1 for c in pool if len(c) == omega)
+    n_top = max(n_top_true, sum(1 for c in pool if len(c) == omega))
+    n_spare = max(n_spare_true, sum(1 for c in pool if len(c) < omega))
+    if difficulty is None and n_nodes:
+        difficulty = difficulty_from_n(n_nodes)
     n_others, difficulty = round_shape(q, difficulty)
     a_hat = phi(n_top) * n_others
     return strategy.slots(pool, q, n_others, a_hat, difficulty,
-                          b_hat=n_others - a_hat)
+                          b_hat=n_others - a_hat,
+                          n_top_supply=n_top, n_spare_supply=n_spare)
 
 
 def _rotation(uuid):
     return int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16)
 
 
-def picker(pool, uuid, hotkeys, difficulty=None):
+def picker(pool, uuid, hotkeys, difficulty=None, n_nodes=None, n_top_true=0,
+           n_spare_true=0):
     """One answer per queried hotkey, in the order the hotkeys were given."""
     assert pool
     assert hotkeys
-    use = slots(pool, hotkeys, difficulty)
+    use = slots(pool, hotkeys, difficulty, n_nodes, n_top_true, n_spare_true)
     assert len(use) == len(hotkeys)
     offset = _rotation(uuid)
     answers = [list(use[(index + offset) % len(use)])

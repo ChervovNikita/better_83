@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""GPU harvester behind fleet_solver.solve_many's signature."""
 
 import importlib.util
 import os
@@ -16,7 +15,6 @@ for _p in (HERE, PARENT):
 
 
 def _load_sibling(name, path):
-    """Imports a module by path, under a name a bare import cannot shadow."""
     key = "sn83_" + name
     if key not in sys.modules:
         spec = importlib.util.spec_from_file_location(key, path)
@@ -32,13 +30,6 @@ CHAMPION_SHARE = fleet_solver.CHAMPION_SHARE
 SPARE_MARGIN = fleet_solver.SPARE_MARGIN
 RESERVE_S = fleet_solver.RESERVE_S
 
-# Tail reserve for the GPU path: kernel exit after the stop flag, the result
-# copy-out, and the host re-verify. Measured at ~0.02s on an idle card, but the
-# whole solve was landing only 0.12s inside a 13s deadline, and a late answer
-# scores a hard zero for every hotkey in the round. Anything that perturbs the
-# card -- another process, a driver hiccup -- spends that margin. The harvest
-# saturates in well under a second on most rounds (measured), so buying the
-# margin back out of harvest time costs almost nothing.
 GPU_RESERVE_S = float(os.environ.get("SN83_GPU_RESERVE", "0.35"))
 GPU_RESERVE_FRAC = float(os.environ.get("SN83_GPU_RESERVE_FRAC", "0.03"))
 
@@ -55,7 +46,6 @@ _last_stats = {}
 
 
 def _init_gpu():
-    """Builds the .so and creates the CUDA context at import, never in a solve."""
     global MAXN
     import gpu_lib
     gpu_lib.load(LANES, PREFIX_ARM)
@@ -71,16 +61,14 @@ _init_gpu()
 
 
 def last_stats():
-    """Device counters from the most recent solve_many."""
     return dict(_last_stats)
 
 
-def solve_many(adjacency_matrix, time_limit, k):
-    """Returns a pool for the picker: up to k omega-cliques, then up to k spares.
+# Research only: cap on cliques stashed for SN83_POOL_DUMP. 0 disables.
+FULL_POOL = int(os.environ.get("SN83_FULL_POOL", "0"))
 
-    Not k cliques in total. The picker chooses q of these, and it needs enough
-    spares to be able to decline omega entirely.
-    """
+
+def solve_many(adjacency_matrix, time_limit, k):
     assert k > 0
     assert time_limit > 0
     A = np.ascontiguousarray(adjacency_matrix, dtype=np.uint8)
@@ -98,12 +86,10 @@ def solve_many(adjacency_matrix, time_limit, k):
         assert champion
         champion = sorted(int(v) for v in champion)
 
-    # Opened before `left` is measured: the allocations and the graph upload are
-    # part of the round's clock, not free.
     with gpu_lib.GpuClique(A, lanes=LANES, prefix=PREFIX_ARM) as gpu:
         left = deadline - time.monotonic()
         assert left > 0.05, "%.3fs left of a %.3fs budget" % (left, time_limit)
-        pool, counters, _hits = gpu.harvest(
+        pool, counters, hits = gpu.harvest(
             time_limit=left,
             seed=1,
             max_steps=STEPS,
@@ -112,17 +98,12 @@ def solve_many(adjacency_matrix, time_limit, k):
             spare_margin=SPARE_MARGIN,
             init_clique=champion,
             max_out=max(4 * k, 1024))
+    # hits align with harvest's pool, so capture them before it is mutated
+    hit_of = {tuple(sorted(c)): int(h) for c, h in zip(pool, hits)}
     if champion:
         pool.append(champion)
     pool.sort(key=len, reverse=True)
 
-    # Exact re-check: a 64-bit fingerprint collision must cost a lost clique,
-    # never an invalid answer. Only what is actually returned is checked --
-    # verifying a full 1024-slot pool costs 0.1s of a 0.15s reserve.
-    # Up to k of EACH class, not k in total. The picker needs k distinct spares
-    # available to be able to decline omega at all; returning k cliques in total
-    # left it with only k - P spares, so it backfilled with the very omega
-    # cliques it was trying to decline and could never reach zero.
     seen = set()
     out = []
     spare = []
@@ -144,6 +125,12 @@ def solve_many(adjacency_matrix, time_limit, k):
     assert out, "harvest returned %d cliques, none valid" % len(pool)
 
     target = len(out[0])
+    # Count DISTINCT cliques: champion is both seeded into harvest and appended
+    # to pool, so a raw count reports one omega-clique more than exists and the
+    # picker spreads over a clique it does not hold.
+    distinct = {tuple(sorted(c)) for c in pool}
+    n_top_true = sum(1 for c in distinct if len(c) == target)
+    n_spare_true = sum(1 for c in distinct if len(c) == target - 1)
     out = sorted(list(c) for c in out)
     spare = [list(c) for c in spare]
 
@@ -153,6 +140,17 @@ def solve_many(adjacency_matrix, time_limit, k):
     _last_stats["pool"] = len(pool)
     _last_stats["distinct_max"] = len(out)
     _last_stats["spares"] = len(spare)
+    _last_stats["n_top_true"] = n_top_true
+    _last_stats["n_spare_true"] = n_spare_true
+    _last_stats["hits"] = [hit_of.get(tuple(c), 0) for c in out + spare]
+    if FULL_POOL:
+        # Research dump: every distinct clique the harvest produced, ranked by
+        # size then basin. NOT put through gpu_lib.verify -- only out/spare are.
+        # Validate offline before drawing any conclusion from these.
+        ranked = sorted(distinct, key=lambda c: (-len(c), -hit_of.get(c, 0)))
+        ranked = ranked[:FULL_POOL]
+        _last_stats["full_pool_unverified"] = [list(c) for c in ranked]
+        _last_stats["full_hits"] = [hit_of.get(c, 0) for c in ranked]
     if DEBUG:
         sys.stderr.write("gpu: omega=%d distinct=%d spares=%d jobs=%d stall=%.2f\n"
                          % (target, len(out), len(spare), counters["jobs"],

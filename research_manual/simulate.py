@@ -8,6 +8,8 @@ import statistics
 import sys
 import time
 
+import numpy as np
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
@@ -22,6 +24,9 @@ import solver
 IMMUNITY_BLOCKS = 6000
 NETWORK_S = 2.0
 OUR_COLDKEY = "our_coldkey"
+MINER_ALPHA_DAY = 2951.6
+POWER_TARGET_TOP_HALF_SHARE = 0.80
+POWER_MAX_GAMMA = 32.0
 ROUNDS_PATH = os.path.join(HERE, "rounds.json")
 METAGRAPH_PATH = os.path.join(HERE, "metagraph.json")
 OUT_PATH = os.path.join(HERE, "sim_out.json")
@@ -68,6 +73,62 @@ def our_name(index):
 
 def percentile(value, values):
     return 100.0 * sum(1 for item in values if item < value) / len(values)
+
+
+def top_half_share(weights, rank_scores):
+    total = float(np.sum(weights))
+    if total <= 0:
+        return 0.0
+    order = np.argsort(-rank_scores)
+    top = order[: len(order) // 2]
+    return float(np.sum(weights[top]) / total)
+
+
+def power_weight(sigmoid, rank_scores):
+    active = sigmoid > 0
+    if not np.any(active):
+        return np.zeros_like(sigmoid, dtype=np.float64)
+
+    def transform(gamma):
+        weights = np.zeros_like(sigmoid, dtype=np.float64)
+        weights[active] = np.power(sigmoid[active], gamma)
+        return weights
+
+    lo = 0.0
+    hi = min(1.0, POWER_MAX_GAMMA)
+    while (
+        top_half_share(transform(hi), rank_scores) < POWER_TARGET_TOP_HALF_SHARE
+        and hi < POWER_MAX_GAMMA
+    ):
+        hi = min(hi * 2.0, POWER_MAX_GAMMA)
+    for _ in range(80):
+        mid = (lo + hi) / 2.0
+        if top_half_share(transform(mid), rank_scores) < POWER_TARGET_TOP_HALF_SHARE:
+            lo = mid
+        else:
+            hi = mid
+    return transform(hi)
+
+
+def validator_weights(scores):
+    scores = np.asarray(scores, dtype=np.float64)
+    assert scores.size
+    span = float(np.max(scores) - np.min(scores))
+    if span == 0:
+        return np.zeros_like(scores)
+    normalized = (scores - np.min(scores)) / span
+    zero_mask = normalized == 0
+    live = normalized[~zero_mask]
+    if live.size == 0:
+        return np.zeros_like(scores)
+    midpoint = np.median(live)
+    steepness = max(np.percentile(live, 75) - np.percentile(live, 25), 0.1)
+    sigmoid = 1.0 / (1.0 + np.exp(-(normalized - midpoint) / steepness))
+    sigmoid[zero_mask] = 0.0
+    weights = power_weight(sigmoid, normalized)
+    total = float(np.sum(weights))
+    assert total > 0
+    return weights / total
 
 
 def our_coldkey_median(scores_by_hotkey, our_hotkeys):
@@ -125,12 +186,28 @@ def report(scores_by_hotkey, coldkey_of, our_hotkeys, verbose):
         ),
         reverse=True,
     )
-    print("coldkey\tn_hotkeys\tmedian")
+    ranked_hotkeys = list(means)
+    weights = validator_weights([means[hotkey] for hotkey in ranked_hotkeys])
+    share_of = {
+        hotkey: float(weight)
+        for hotkey, weight in zip(ranked_hotkeys, weights, strict=True)
+    }
+    by_cold_share = collections.defaultdict(float)
+    for hotkey, share in share_of.items():
+        if hotkey in ours:
+            by_cold_share[OUR_COLDKEY] += share
+        else:
+            by_cold_share[coldkey_of[hotkey]] += share
+    print("coldkey\tn_hotkeys\tmedian\talpha/day")
     for median, coldkey, count in cold_medians:
-        print(f"{coldkey}\t{count}\t{median:.4f}")
+        alpha = by_cold_share[coldkey] * MINER_ALPHA_DAY
+        print(f"{coldkey}\t{count}\t{median:.4f}\t{alpha:.1f}")
 
     field_means = list(field.values())
     print(f"median_all_miners\t{statistics.median(field_means):.4f}")
+    our_share = by_cold_share.get(OUR_COLDKEY, 0.0)
+    print(f"expected_share\t{our_share:.4%}")
+    print(f"expected_alpha/day\t{our_share * MINER_ALPHA_DAY:.1f}")
 
     our_pct = []
     n_unqueried = 0
