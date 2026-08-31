@@ -37,6 +37,13 @@
 #define SN83_KMAX 160
 
 #define SN83_MAXBANS 8
+
+// Maximal cliques staged per job by the plateau walk.  Once a walker reaches
+// omega it does not stop -- it keeps swapping, and every swap at constant size
+// lands on ANOTHER maximal omega-clique one vertex away.  The walk used to
+// report only `bestv`, so all of those were discarded and the pool was left
+// with a single clique per job from a tour that passed over many.
+#define SN83_PLAT_MAX 8
 #define SN83_NLEV 5   // level == |ban set|, 0..4; pop scans ascending (§5)
 
 // 32 => one warp per walker, 4 walkers per 128-thread block.  64/128 => the
@@ -209,6 +216,8 @@ struct WS {
     int q_flags;
     int res_slot;
     int keep_flag;
+    int plat_n;                      // maximal cliques staged this job
+    short plat_size[SN83_PLAT_MAX];
     long long step;
 };
 
@@ -453,6 +462,7 @@ struct Ctx {
     Grp gr;
     int *age;      // [n_pad] for this walker, global
     short *bestv;  // [SN83_KMAX] for this walker, global
+    short *plat;   // [SN83_PLAT_MAX][SN83_KMAX] staged plateau cliques
 #if SN83_CANDS_PREFIX
     u64 *prefix;
     u64 *suffix;
@@ -651,6 +661,7 @@ __device__ void w_run(Ctx &c, long long max_steps) {
     if (c.gr.lane == 0) {
         s.step = 0;
         s.best_size = 0;
+        s.plat_n = 0;
     }
     gsync(s);
 
@@ -688,6 +699,21 @@ __device__ void w_run(Ctx &c, long long max_steps) {
                 last_gain = s.step;
             }
             continue;
+        }
+
+        // ma == 0: C is maximal in G-bans, i.e. a point on the plateau.  Stage
+        // it before the swap below moves off it.  Extension into the full graph
+        // and the maximality that the validator demands are applied later, by
+        // the same w_extend_full the job's own result goes through.
+        if (s.k > 0 && s.k >= s.best_size && s.plat_n < SN83_PLAT_MAX) {
+            const int t = s.plat_n;
+            for (int i = c.gr.lane; i < s.k; i += SN83_LANES)
+                c.plat[(size_t)t * SN83_KMAX + i] = s.C[i];
+            if (c.gr.lane == 0) {
+                s.plat_size[t] = (short)s.k;
+                s.plat_n = t + 1;
+            }
+            gsync_mem(s);
         }
 
         for (int w = c.gr.lane; w < c.g.W; w += SN83_LANES)
@@ -883,6 +909,7 @@ __device__ JobOut run_job(Ctx &c, const Job &job, u64 *banbits) {
 struct WalkerMem {
     int *age;
     short *bestv;
+    short *plat;        // n_walkers * SN83_PLAT_MAX * SN83_KMAX
     int n_pad;
 #if SN83_CANDS_PREFIX
     u64 *ps;
@@ -898,6 +925,7 @@ __device__ __forceinline__ void ctx_init(Ctx &c, const DGraph &g, const Cfg &cfg
     c.gr.lane = lane;
     c.age = wm.age + (size_t)wid * wm.n_pad;
     c.bestv = wm.bestv + (size_t)wid * SN83_KMAX;
+    c.plat = wm.plat + (size_t)wid * SN83_PLAT_MAX * SN83_KMAX;
     c.stop = stop;
 #if SN83_CANDS_PREFIX
     c.prefix = wm.ps + (size_t)wid * 2 * SN83_PS_WORDS;
@@ -1070,12 +1098,41 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
         }
 
         JobOut o = run_job(c, job, sh.ban[wib]);
+        gsync(s);
+        const int n_plat = s.plat_n;
+
+        // t == -1 is the job's own result; t >= 0 are the maximal cliques the
+        // walk stood on and used to throw away.  All of them go through the
+        // same extension, fingerprint, dedup and insert -- a staged clique is
+        // not trusted any further than the result the job would have returned.
+        for (int t = -1; t < n_plat; ++t) {
+        if (t >= 0) {
+            w_clear(c);
+            for (int w = lane; w < c.g.W; w += SN83_LANES)
+                s.conf[w] = allmask(c.g, w);
+            gsync(s);
+            if (lane == 0) {
+                const int n = s.plat_size[t];
+                for (int i = 0; i < n; ++i) {
+                    const int v = c.plat[(size_t)t * SN83_KMAX + i];
+                    s.C[i] = (short)v;
+                    s.Cb[v >> 6] |= 1ull << (v & 63);
+                }
+                s.k = n;
+            }
+            gsync_mem(s);
+            o.banback = w_extend_full(c, job.n_bans ? sh.ban[wib] : (const u64 *)0);
+            o.size = s.k;
+            o.fp = w_fingerprint(c);
+        }
 
         if (lane == 0) {
-            atomicAdd(&p.ctr[C_STEPS], (u64)s.step);
-            atomicAdd(&p.ctr[C_JOBS], 1ull);
-            atomicAdd(&p.ctr[C_BANBACK], (u64)o.banback);
-            if (s.kmax_hit) atomicAdd(&p.ctr[C_KMAXHIT], 1ull);
+            if (t < 0) {
+                atomicAdd(&p.ctr[C_STEPS], (u64)s.step);
+                atomicAdd(&p.ctr[C_JOBS], 1ull);
+                atomicAdd(&p.ctr[C_BANBACK], (u64)o.banback);
+                if (s.kmax_hit) atomicAdd(&p.ctr[C_KMAXHIT], 1ull);
+            }
 
             int prev = atomicMax(p.target, o.size);
             int cur = prev > o.size ? prev : o.size;
@@ -1114,7 +1171,7 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
                     if (rs < p.res_total) atomicAdd(&p.res_hits[rs], 1u);
                 }
             }
-            if (o.size < cur) {
+            if (t < 0 && o.size < cur) {
                 atomicAdd(&p.ctr[C_SHORT], 1ull);
                 // Short-return doubling, the port of BAN_FRAC *= 2.0.
                 if ((int)job.max_steps < cfg.max_steps_cap) {
@@ -1140,7 +1197,8 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
             if (lane == 0) {
                 // Children only from full-size cliques: a spare's children
                 // would aim at omega-2.
-                if (cfg.gen_children && o.size >= atomicAdd(p.target, 0)) {
+                if (t < 0 && cfg.gen_children &&
+                    o.size >= atomicAdd(p.target, 0)) {
                     for (int i = 0; i < o.size; ++i) {
                         Job j;
                         j.seed = mix64(o.fp ^ ((u64)i * 0x9E3779B97F4A7C15ull));
@@ -1156,6 +1214,7 @@ __global__ __launch_bounds__(SN83_BLOCK) void harvest_kernel(DGraph g, Cfg cfg,
                 }
             }
             gsync(s);
+        }
         }
 
         if (lane == 0) atomicAdd(&p.ctr[C_DONE], 1ull);
@@ -1576,6 +1635,7 @@ struct Handle {
     int n_walkers = 0, n_blocks = 0;
     int *d_age = nullptr;
     short *d_bestv = nullptr;
+    short *d_plat = nullptr;
 #if SN83_CANDS_PREFIX
     u64 *d_ps = nullptr;
 #endif
@@ -1618,6 +1678,7 @@ WalkerMem wmem(const Handle &h) {
     WalkerMem w;
     w.age = h.d_age;
     w.bestv = h.d_bestv;
+    w.plat = h.d_plat;
     w.n_pad = h.n_pad;
 #if SN83_CANDS_PREFIX
     w.ps = h.d_ps;
@@ -1796,6 +1857,10 @@ void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
     if ((e = cudaMalloc(&h->d_bestv,
                         (size_t)h->n_walkers * SN83_KMAX * sizeof(short))) != cudaSuccess)
         return fail("cudaMalloc bestv");
+    if ((e = cudaMalloc(&h->d_plat,
+                        (size_t)h->n_walkers * SN83_PLAT_MAX * SN83_KMAX *
+                            sizeof(short))) != cudaSuccess)
+        return fail("cudaMalloc plat");
 #if SN83_CANDS_PREFIX
     if ((e = cudaMalloc(&h->d_ps, (size_t)h->n_walkers * 2 * SN83_PS_WORDS *
                                       sizeof(u64))) != cudaSuccess)
@@ -1850,6 +1915,7 @@ void sn83_gpu_close(void *hv) {
     cudaFree(h->d_deg);
     cudaFree(h->d_age);
     cudaFree(h->d_bestv);
+    cudaFree(h->d_plat);
 #if SN83_CANDS_PREFIX
     cudaFree(h->d_ps);
 #endif

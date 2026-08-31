@@ -58,10 +58,14 @@ def load_rounds(path, n_rounds, only=None):
     assert rows
     if only:
         with open(only) as handle:
-            wanted = {line.strip() for line in handle if line.strip()}
-        rows = [row for row in rows if row[1] in wanted]
-        assert len(rows) == len(wanted), (len(rows), len(wanted))
-        return rows
+            wanted = [line.strip() for line in handle if line.strip()]
+        # File ORDER is preserved, not re-sorted by timestamp: the caller ranks
+        # the stratum (hardest first, say) and a timestamp sort would throw that
+        # away and hide the interesting rounds at the end of a long run.
+        by_id = {row[1]: row for row in rows}
+        missing = [rid for rid in wanted if rid not in by_id]
+        assert not missing, missing[:5]
+        return [by_id[rid] for rid in wanted]
     assert n_rounds <= len(rows), (n_rounds, len(rows))
     return rows[:n_rounds]
 

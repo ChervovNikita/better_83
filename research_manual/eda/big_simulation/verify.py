@@ -70,8 +70,12 @@ def check_partial(trials=300, seed=555):
     worst = 0.0
     for _ in range(trials):
         omega = rng.choice([20, 30, 38, 41])
+        # randint(1, 7) cliques means the omega class is NEVER empty, so the
+        # region where the fast family is known to fall short -- no occupied
+        # maximum clique but free capacity to open one -- was unsampled.
+        n_top_occ = rng.randint(0, 7)
         view = {omega: {"counts": sorted(rng.randint(1, 5)
-                                         for _ in range(rng.randint(1, 7))),
+                                         for _ in range(n_top_occ)),
                         "free": rng.randint(0, 6)}}
         if rng.random() < 0.7:
             view[omega - 1] = {"counts": sorted(rng.randint(1, 4)
@@ -79,6 +83,8 @@ def check_partial(trials=300, seed=555):
                                "free": rng.randint(0, 6)}
         difficulty = rng.choice([0.7, 0.8, 0.9, 1.0])
         q = rng.randint(1, 6)
+        if not any(view[s_]["counts"] for s_ in view):
+            continue
         fast = partial.best_response_fast(view, difficulty, q, omega)[0]
         exact = partial.best_response(view, difficulty, q, omega)[0]
         total += 1
@@ -322,7 +328,8 @@ def check_maximin(trials=400, seed=17):
         w_a, w_b = q_a / float(rnd.fleet_a), q_b / float(rnd.fleet_b)
 
         def value(board):
-            _t, ma, mb = native.best_response(board, rnd, q_b)
+            # B optimises the pooled objective, matching what maximin assumes.
+            _t, ma, mb = native.best_response_weighted(board, rnd, q_b, w_a, w_b)
             return w_a * ma - w_b * mb
 
         best = max(value(b) for b in _all_a_boards(rnd, q_a))
@@ -359,8 +366,9 @@ def check_bayes(trials=150, seed=29):
         def value(board):
             total = 0.0
             for k, w in posterior:
-                _t, ma, mb = native.best_response(board, rnd, k)
-                total += w * (q_a / rnd.fleet_a * ma - k / rnd.fleet_b * mb)
+                wa, wb = q_a / rnd.fleet_a, k / rnd.fleet_b
+                _t, ma, mb = native.best_response_weighted(board, rnd, k, wa, wb)
+                total += w * (wa * ma - wb * mb)
             return total
 
         best = max(value(b) for b in _all_a_boards(rnd, q_a))

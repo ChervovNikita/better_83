@@ -405,8 +405,11 @@ double bs_bayes(int q_a, const int* ks, const double* ws, int n_k, int omega,
     for (int i = 0; i < n_k; ++i) {
       std::vector<Entry> work = board, reply;
       double ma = 0.0, mb = 0.0;
+      // B optimises the POOLED margin, the same objective the sweep scores.
+      // Leaving the weights at their defaults models an opponent maximising
+      // mean_B - mean_A, which is a different player whenever the fleets differ.
       solve_core(work, ks[i], omega, n_top, n_spare, difficulty, &reply, &ma,
-                 &mb);
+                 &mb, q_a / fleet_a, ks[i] / fleet_b);
       value += ws[i] * (q_a / fleet_a * ma - ks[i] / fleet_b * mb);
     }
     return value;
@@ -428,7 +431,8 @@ double bs_maximin(int q_a, int q_b, int omega, int n_top, int n_spare,
   auto eval = [&](const std::vector<Entry>& board) {
     std::vector<Entry> work = board, reply;
     double ma = 0.0, mb = 0.0;
-    solve_core(work, q_b, omega, n_top, n_spare, difficulty, &reply, &ma, &mb);
+    solve_core(work, q_b, omega, n_top, n_spare, difficulty, &reply, &ma, &mb,
+               q_a / fleet_a, q_b / fleet_b);
     return q_a / fleet_a * ma - q_b / fleet_b * mb;
   };
   double best = -1e18;
