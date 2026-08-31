@@ -18,24 +18,79 @@ Field occupancy is forecast from the rules the three real operators were measure
 to follow, not assumed uniform.
 """
 import collections
+import json
 import hashlib
 import math
 import os
 
-# Fleet sizes measured from the metagraph over the logged rounds.
-TOP4_HOTKEYS = 178
-E2_HOTKEYS = 33
-E3_HOTKEYS = 29
-OTHER_HOTKEYS = 6
+# Operator identity is measured; fleet SIZES are not constants. A hotkey we
+# register displaces someone, and the validator's churn takes the lowest-incentive
+# miners first -- which are entities 2 and 3, not the dominant operator. So the
+# field a picker faces depends on our own fleet size, and hard-coding 178/33/29
+# models opponents that may no longer be registered.
+#
+#   N=40  -> TOP4 178, E2 20, E3  9, other 2
+#   N=80  -> TOP4 168, E2  0, E3  0, other 1   <- E2 and E3 are GONE
+#   N=120 -> TOP4 128, E2  0, E3  0, other 1
+#
+# Everything below therefore derives the rival profile from the metagraph at call
+# time. The metagraph is public and our own hotkeys are known, so this is
+# information a deployed miner genuinely has.
 
+OPERATORS = {
+    "top4": ("5HMevt8h", "5Eyh8ePM", "5EfHz7fE", "5Hg2Ps2L"),
+    "e2": ("5D7BMeGt",),
+    "e3": ("5GghBgin",),
+}
 # TOP4's level rule, fitted exactly on 739 rounds.
 TOP4_S_STAR = {0.7: 12, 0.8: 8, 0.9: 5, 1.0: 3}
 # Entities 2 and 3 run the same fill-and-spill; they differ only in solver reach.
-E2_REACH = 0.76
-E3_REACH = 0.97
+REACH = {"e2": 0.76, "e3": 0.97}
+
+METAGRAPH = os.environ.get(
+    "SN83_METAGRAPH",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 "metagraph.json"))
+FLEET_N = int(os.environ.get("SN83_FLEET_N", "0"))
+IMMUNITY_BLOCKS = 6000
 
 REF_R = 1.5
 POISSON_TERMS = 24
+_profile_cache = {}
+
+
+def _operator_of(coldkey):
+    for name, prefixes in OPERATORS.items():
+        if coldkey.startswith(prefixes):
+            return name
+    return "other"
+
+
+def fleet_profile(fleet_n):
+    """Rival hotkey counts once OUR fleet_n hotkeys have displaced the weakest.
+
+    Mirrors the validator's churn order (lowest incentive, then uid) so the
+    profile matches who is actually registered alongside us. Falls back to the
+    full metagraph when it cannot be read, which is the conservative direction:
+    it over-states the opposition rather than inventing an empty field.
+    """
+    if fleet_n in _profile_cache:
+        return _profile_cache[fleet_n]
+    counts = collections.Counter()
+    try:
+        with open(METAGRAPH) as handle:
+            meta = json.load(handle)
+        block = meta["block"]
+        cand = [m for m in meta["miners"]
+                if block - m["block_at_registration"] >= IMMUNITY_BLOCKS]
+        taken = {m["hotkey"] for m in cand[:max(0, int(fleet_n))]}
+        for m in meta["miners"]:
+            if m["hotkey"] not in taken:
+                counts[_operator_of(m["coldkey"])] += 1
+    except (OSError, ValueError, KeyError):
+        counts.update({"top4": 178, "e2": 33, "e3": 29, "other": 9})
+    _profile_cache[fleet_n] = counts
+    return counts
 
 
 def selection_p(difficulty):
@@ -60,51 +115,42 @@ def _spread(total, parts):
     return [base + 1] * extra + [base] * (parts - extra)
 
 
-def forecast(difficulty, n_top, n_spare):
-    """Expected field answers and distinct cliques used, per level.
+def forecast(difficulty, n_top, n_spare, fleet_n=0):
+    """Expected field answers and distinct cliques per level, for THIS field.
 
-    Applies each operator's measured rule to the round's supply.  Returns
-    (F_top, F_spare, d_top, d_spare, n_field) where F_* are answer counts and
-    d_* are distinct cliques the field is expected to occupy.
+    Applies each operator's measured rule to the round's supply, with fleet sizes
+    taken from the live profile rather than from constants.
     """
     p = selection_p(difficulty)
-    q4 = TOP4_HOTKEYS * p
-    q2 = E2_HOTKEYS * p
-    q3 = E3_HOTKEYS * p
-    q5 = OTHER_HOTKEYS * p
+    prof = fleet_profile(fleet_n)
+    q = {k: prof.get(k, 0) * p for k in ("top4", "e2", "e3", "other")}
 
-    f_top = 0.0
-    f_sp = 0.0
-    d_top = 0.0
-    d_sp = 0.0
+    f_top = f_sp = d_top = d_sp = 0.0
 
     # TOP4: all-or-nothing on the S* threshold, then spread(q, min(q, supply)).
     star = TOP4_S_STAR.get(round(difficulty, 1), 3)
     if n_top >= star:
-        f_top += q4
-        d_top += min(q4, max(1, n_top))
+        f_top += q["top4"]
+        d_top += min(q["top4"], max(1, n_top))
     else:
-        f_sp += q4
-        d_sp += min(q4, max(1, n_spare))
+        f_sp += q["top4"]
+        d_sp += min(q["top4"], max(1, n_spare))
 
     # Entities 2 and 3: fill omega with distinct cliques, spill the rest.
-    for q_i, reach in ((q2, E2_REACH), (q3, E3_REACH)):
-        take = min(q_i, max(1, n_top) * reach)
+    for name in ("e2", "e3"):
+        take = min(q[name], max(1, n_top) * REACH[name])
         f_top += take
         d_top += take
-        f_sp += q_i - take
-        d_sp += q_i - take
+        f_sp += q[name] - take
+        d_sp += q[name] - take
 
     # Everyone else: always omega.
-    f_top += q5
-    d_top += min(q5, max(1, n_top))
+    f_top += q["other"]
+    d_top += min(q["other"], max(1, n_top))
 
-    # Distinct coverage cannot exceed supply, and entities overlap: if each
-    # operator picks d_i of S uniformly, the expected covered set is
-    # S(1 - prod(1 - d_i/S)), not the sum.
     d_top = min(d_top, float(n_top))
     d_sp = min(d_sp, float(n_spare))
-    return f_top, f_sp, d_top, d_sp, q4 + q2 + q3 + q5
+    return f_top, f_sp, d_top, d_sp, sum(q.values())
 
 
 def _poisson_share(lam, a):
@@ -126,6 +172,19 @@ def _poisson_share(lam, a):
     return total
 
 
+def infer_fleet_n(q, difficulty):
+    """Our own fleet size, from the env if set, else from the queried count.
+
+    q ~ Binomial(N, p(D)), so q/p(D) is an unbiased estimate of N. Noisy for one
+    round, but the profile only has to be right to the nearest churn boundary,
+    and being wrong here is what made the N=40-tuned picker fail at N=80.
+    """
+    if FLEET_N > 0:
+        return FLEET_N
+    p = selection_p(difficulty)
+    return int(round(q / p)) if p > 1e-9 else q
+
+
 def _order(pool, omega, prefer_large_basin, hits):
     """Cliques of each level, best-first.
 
@@ -142,7 +201,8 @@ def _order(pool, omega, prefer_large_basin, hits):
 
 
 def _allocate(pool, q, difficulty, n_top_true, n_spare_true,
-              prefer_large_basin=True, hits=None, allow_repeats=True):
+              prefer_large_basin=True, hits=None, allow_repeats=True,
+              fleet_n=0):
     """Greedy on exact marginals -- optimal for a separable concave objective.
 
     Marginal of the (a+1)-th hotkey on a clique whose expected field load is lam:
@@ -158,7 +218,8 @@ def _allocate(pool, q, difficulty, n_top_true, n_spare_true,
     n_top = max(int(n_top_true) or len(top), 1)
     n_sp = max(int(n_spare_true) or len(spare), 1)
 
-    f_top, f_sp, _d_top, _d_sp, n_field = forecast(difficulty, n_top, n_sp)
+    f_top, f_sp, _d_top, _d_sp, n_field = forecast(difficulty, n_top, n_sp,
+                                                   fleet_n or infer_fleet_n(q, difficulty))
     lam_top = f_top / float(n_top)
     lam_sp = f_sp / float(n_sp)
     rho = omega / float(omega - 1) if omega > 1 else 1.0
@@ -221,13 +282,13 @@ def _rotate(uuid, slots, hotkeys):
 
 
 def picker(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
-           n_top_true=0, n_spare_true=0):
+           n_top_true=0, n_spare_true=0, fleet_n=0):
     """H4 -- the theory-complete candidate: exact greedy on predicted occupancy."""
     assert pool and hotkeys
     if difficulty is None:
         difficulty = difficulty_from_n(n_nodes) if n_nodes else 0.8
     slots = _allocate(pool, len(hotkeys), difficulty, n_top_true, n_spare_true,
-                      hits=hits)
+                      hits=hits, fleet_n=fleet_n)
     return _rotate(uuid, slots, hotkeys)
 
 
@@ -275,7 +336,8 @@ def _rank_slots(slots, pool, difficulty, n_top_true, n_spare_true, hits):
     omega = max(len(c) for c in pool)
     n_top = max(int(n_top_true) or 1, 1)
     n_sp = max(int(n_spare_true) or 1, 1)
-    f_top, f_sp, _dt, _ds, _nf = forecast(difficulty, n_top, n_sp)
+    f_top, f_sp, _dt, _ds, _nf = forecast(difficulty, n_top, n_sp,
+                                          infer_fleet_n(len(slots), difficulty))
     lam = {omega: f_top / float(n_top), omega - 1: f_sp / float(n_sp)}
     mult = collections.Counter(tuple(sorted(c)) for c in slots)
     key = {}
@@ -413,14 +475,16 @@ def _twopoint_share(n_cliques, occupants, d_used, a):
     return (1.0 - p_hit) * 1.0 + p_hit * (a / float(a + load))
 
 
-def _allocate_even(pool, q, difficulty, n_top_true, n_spare_true, hits=None):
+def _allocate_even(pool, q, difficulty, n_top_true, n_spare_true, hits=None,
+                   fleet_n=0):
     """Greedy on marginals, with the field's EVEN spread modelled explicitly."""
     omega = max(len(c) for c in pool)
     top = [c for c in pool if len(c) == omega]
     spare = [c for c in pool if len(c) == omega - 1]
     n_top = max(int(n_top_true) or len(top), 1)
     n_sp = max(int(n_spare_true) or len(spare), 1)
-    f_top, f_sp, d_top, d_sp, n_field = forecast(difficulty, n_top, n_sp)
+    f_top, f_sp, d_top, d_sp, n_field = forecast(difficulty, n_top, n_sp,
+                                                 fleet_n or infer_fleet_n(q, difficulty))
     rho = omega / float(omega - 1) if omega > 1 else 1.0
 
     a_top = min(q, len(top))
@@ -518,7 +582,8 @@ def picker_level(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
 
     n_top = max(int(n_top_true) or len(top), 1)
     n_sp = max(int(n_spare_true) or len(spare), 1)
-    f_top, f_sp, _dt, _ds, n_field = forecast(difficulty, n_top, n_sp)
+    f_top, f_sp, _dt, _ds, n_field = forecast(difficulty, n_top, n_sp,
+                                              infer_fleet_n(q, difficulty))
     rho = omega / float(omega - 1) if omega > 1 else 1.0
     n_all = max(1.0, n_field + q)
 

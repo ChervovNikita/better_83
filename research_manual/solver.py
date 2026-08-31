@@ -61,6 +61,11 @@ PICKER_WANTS_SUPPLY = "n_top_true" in inspect.signature(picker).parameters
 # basin in every supply band. It lives in the solver's stats and was not being
 # offered to the picker at all.
 PICKER_WANTS_HITS = "hits" in inspect.signature(picker).parameters
+# Our own fleet size changes WHO the rivals are: registering hotkeys displaces the
+# lowest-incentive miners, which are the smaller operators. A picker that models a
+# fixed field is modelling opponents that our own growth deregistered.
+PICKER_WANTS_FLEET = "fleet_n" in inspect.signature(picker).parameters
+FLEET_N = int(os.environ.get("SN83_FLEET_N", "0"))
 
 
 POOL_DUMP = os.environ.get("SN83_POOL_DUMP", "")
@@ -173,6 +178,8 @@ def solve(hotkeys, adjacency_matrix, time_limit, uuid):
         kwargs["n_spare_true"] = stats.get("n_spare_true", 0)
     if PICKER_WANTS_HITS:
         kwargs["hits"] = list(stats.get("hits", []))
+    if PICKER_WANTS_FLEET:
+        kwargs["fleet_n"] = FLEET_N
     answers = picker(pool, uuid, list(hotkeys), **kwargs)
     assert len(answers) == len(hotkeys)
     if POOL_DUMP:

@@ -45,6 +45,16 @@ def main():
     args = ap.parse_args()
 
     payload, per, cold = load(args.dump)
+    # A round our fleet answered LATE scores every one of our queried hotkeys at
+    # zero, which moves the median hard. It happened once here: a run that built
+    # the GPU cache while it scored overran two deadlines and lost 35 answers,
+    # which read as a 0.06 strategy regression and got a mechanism invented for
+    # it. An arm paying a cost the others do not is not a comparison, so refuse
+    # to report the number without flagging it.
+    empty = sum(1 for rec in payload.values()
+                for a in rec["answers"] if a[1].startswith(OURS_PREFIX) and not a[3])
+    total = sum(1 for rec in payload.values()
+                for a in rec["answers"] if a[1].startswith(OURS_PREFIX))
     means = {h: statistics.mean(v) for h, v in per.items() if v}
     ours = {h: m for h, m in means.items() if h.startswith(OURS_PREFIX)}
     field = {h: m for h, m in means.items() if not h.startswith(OURS_PREFIX)}
@@ -59,11 +69,18 @@ def main():
     if args.json:
         print(json.dumps({"edge": edge, "our_median": our_med,
                           "field_median": field_med, "n_ours": len(ours),
-                          "n_field": len(field), "rounds": len(payload)}))
+                          "n_field": len(field), "rounds": len(payload),
+                          "empty_answers": empty,
+                          "SUSPECT": empty > 0}))
         return
 
     print("rounds %d | our hotkeys scored %d | field hotkeys %d"
           % (len(payload), len(ours), len(field)))
+    if empty:
+        print("  WARNING: %d/%d of our answers are EMPTY (late rounds). Every such"
+              % (empty, total))
+        print("  answer scores 0 and drags our_median down. This run is NOT")
+        print("  comparable with one that had a warm cache.")
     print("  our_median   %.6f" % our_med)
     print("  field_median %.6f" % field_med)
     print("  EDGE         %+.6f" % edge)
