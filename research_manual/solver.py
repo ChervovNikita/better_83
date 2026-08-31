@@ -159,7 +159,27 @@ def solve(hotkeys, adjacency_matrix, time_limit, uuid):
     assert budget > 0, time_limit
     matrix = np.asarray(adjacency_matrix, dtype=np.uint8)
     k = len(hotkeys)
-    cached = _cache_load().get((str(uuid), k * POOL_K_MULT)) if POOL_CACHE else None
+    cached = None
+    if POOL_CACHE:
+        want = k * POOL_K_MULT
+        c = _cache_load()
+        cached = c.get((str(uuid), want))
+        if cached is None:
+            # A pool built at a LARGER k is a superset: solve_many takes the first
+            # k distinct cliques of each size in a fixed order, so truncating a
+            # k=50 pool gives exactly the k=10 pool. That lets one expensive cache
+            # serve a whole fleet-size sweep instead of one build per N.
+            bigger = sorted((kk for (u, kk) in c if u == str(uuid) and kk >= want))
+            if bigger:
+                src = c[(str(uuid), bigger[0])]
+                om = max(len(x) for x in src["pool"]) if src["pool"] else 0
+                keep, seen_t, seen_s = [], 0, 0
+                for cl in src["pool"]:
+                    if len(cl) == om and seen_t < want:
+                        keep.append(cl); seen_t += 1
+                    elif len(cl) == om - 1 and seen_s < want:
+                        keep.append(cl); seen_s += 1
+                cached = dict(src, pool=keep, hits=src["hits"][:len(keep)])
     if cached is not None:
         pool = [list(c) for c in cached["pool"]]
         stats = {"n_top_true": cached["n_top_true"],

@@ -1099,3 +1099,70 @@ def picker_exact(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
         pick = top or spare
         slots.append(list(pick[len(slots) % len(pick)]))
     return _rotate(uuid, slots[:a], hotkeys)
+
+
+# Above this fleet size we hold a large enough majority that the mirror is
+# feasible on every clique, so J >= 0 is GUARANTEED whatever the rival does --
+# including an adaptive rival who would otherwise force the draw on us. Below it
+# we best-respond to the measured fixed rule, which is strictly better than 0 but
+# only because they are not adapting.
+MINIMAX_N = int(os.environ.get("SN83_MINIMAX_N", "150"))
+
+
+def _mirror_split(difficulty, a, b, n_top, n_spare):
+    """Our level split that mirrors the rival's, which yields J = 0 exactly."""
+    b_top, _d, _m, _bs, _ds, _ms = _rival_shape(difficulty, b, n_top, n_spare)
+    return int(round(a * (b_top / max(1e-9, b))))
+
+
+def picker_unified(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                   n_top_true=0, n_spare_true=0, fleet_n=0):
+    """One strategy for every fleet size.
+
+    Best-responds to the rival's measured rule via the exact J optimum, with the
+    rival PROFILE derived from the metagraph minus our own hotkeys -- so as N grows
+    and our registrations displace the smaller operators, the model follows.
+
+    Guard: the minimax value of this game is 0. A rival who mirrors us
+    proportionally (f_j = (b/a)x_j, same fractions per level) forces alpha = beta
+    and Div_A(1/a+1/b) = C/b, hence J = 0 exactly. Our edge therefore comes
+    entirely from the rival playing a FIXED rule rather than best-responding. When
+    the model says no allocation beats 0 -- which is what an adaptive rival would
+    enforce -- fall back to mirroring their shape, which concedes nothing.
+    """
+    assert pool and hotkeys
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes) if n_nodes else 0.8
+    a = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega]
+    spare = [c for c in pool if len(c) == omega - 1]
+    n_top = max(int(n_top_true) or len(top), 1)
+    n_sp = max(int(n_spare_true) or len(spare), 1)
+    fn = fleet_n or infer_fleet_n(a, difficulty)
+    b = max(1e-9, sum(fleet_profile(fn).values()) * selection_p(difficulty))
+
+    if fn >= MINIMAX_N:
+        # majority regime: take the guaranteed draw-or-better rather than a best
+        # response that an adaptive rival could punish
+        a_top = _mirror_split(difficulty, a, b, n_top, n_sp)
+    else:
+        a_top, j = optimal_split_exact(difficulty, a, b, n_top, n_sp, omega,
+                                       usable_top=len(top) or 1,
+                                       usable_spare=len(spare) or 1)
+        if j <= 0.0:
+            a_top = _mirror_split(difficulty, a, b, n_top, n_sp)
+    a_top = min(a_top, a) if top else 0
+
+    slots = []
+    if a_top and top:
+        for i, mlt in enumerate(_spread(a_top, min(a_top, len(top)))):
+            slots.extend([list(top[i])] * mlt)
+    rest = a - len(slots)
+    if rest > 0 and spare:
+        for i, mlt in enumerate(_spread(rest, min(rest, len(spare)))):
+            slots.extend([list(spare[i])] * mlt)
+    while len(slots) < a:
+        pick = top or spare
+        slots.append(list(pick[len(slots) % len(pick)]))
+    return _rotate(uuid, slots[:a], hotkeys)

@@ -27,19 +27,33 @@ import strategies
 from scoring import score
 
 
-def _probe_seconds(view, rnd):
-    """Returns the measured cost of evaluating one plan on this view."""
+def _probe_seconds(view, rnd, q):
+    """Returns the cost of evaluating one REPRESENTATIVE plan on this view.
+
+    Timing a plan like [1, 0, 0, ...] measures the cheapest possible candidate:
+    one distinct B-value means a tiny contingency table. The search spends its
+    time on plans that spread B over many cliques, where the number of distinct
+    (A count, B count) classes -- and so the table enumeration -- is far larger.
+    Probing the cheap shape underestimated by enough that rounds ran 858s
+    against a 300s deadline, so the probe now spreads q the way a real
+    candidate does.
+    """
     sizes = sorted(view, reverse=True)
     plan = {"fresh": []}
+    left = q
     for size in sizes:
         counts = view[size]["counts"]
-        if counts:
-            plan[size] = (counts, [1] + [0] * (len(counts) - 1))
+        if not counts:
+            continue
+        slots = len(counts)
+        base, extra = divmod(left, slots)
+        plan[size] = (counts, [base + 1] * extra + [base] * (slots - extra))
+        left = 0
     if len(plan) == 1:
         return 0.0
     started = time.time()
     native.expected_scores(plan, rnd.difficulty, rnd.omega)
-    return max(time.time() - started, 1e-6)
+    return max(time.time() - started, 1e-9)
 
 
 def play(rnd, g, o, cap, rng, strategy, deadline):
@@ -62,13 +76,19 @@ def play(rnd, g, o, cap, rng, strategy, deadline):
     # plan and multiply by the exact plan count, rather than assuming a rate.
     # A single candidate can outlast the deadline on its own, which is why the
     # in-search deadline alone could not bound the round.
-    probe = _probe_seconds(view, rnd)
+    probe = _probe_seconds(view, rnd, q_b)
     # The cap only skips rounds too large to be worth starting; the deadline is
     # what actually bounds the run, and a missed deadline falls back to the
     # full-sight solver, which is the stronger opponent.
     result = None
     n_plans = partial_module.count_candidates(view, q_b)
-    if n_plans * probe <= deadline and n_plans <= cap:
+    # A single candidate can outlast the deadline on its own, and the in-search
+    # check only fires BETWEEN candidates, so a slow per-candidate cost has to
+    # disqualify the round outright rather than be amortised over the count.
+    affordable = (probe <= deadline / 1000.0
+                  and n_plans * probe <= deadline
+                  and n_plans <= cap)
+    if affordable:
         result = partial_module.best_response(
             view, rnd.difficulty, q_b, rnd.omega, fleet_a=g, fleet_b=o,
             deadline=time.time() + deadline)
