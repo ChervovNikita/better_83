@@ -1,22 +1,3 @@
-"""The researched champion (research/native/clique.cpp), wired for the live miner.
-
-Everything in research/ was measured against a solver that the deployed miner never
-called: CliqueAI/miner.py runs `nx.approximation.max_clique`, a greedy approximation
-that does not reach omega. "Promoted to native/clique.cpp" meant promoted within the
-research harness. This module is the missing link.
-
-Three properties matter more than speed here, because a bad answer scores a hard zero
-while the upstream answer at least scores something:
-
-  1. FALLBACK. Any failure -- missing .so, build error, ctypes fault, timeout overrun --
-     returns the upstream result instead of raising. The miner must always answer.
-  2. VALIDATION. The returned vertex set is checked to be a clique AND maximal before it
-     is used. The validator tests maximality, not maximumness, so a non-maximal answer
-     is worth zero even when it is large.
-  3. DEADLINE. The solver is given the synapse timeout minus a round-trip reserve. A
-     late answer is a zero on chain. The 2 s reserve was measured: parity 99.800% ->
-     99.600%, McNemar p=1.0000, reward -0.0001, 0 invalid, 0 over budget.
-"""
 import os
 import sys
 import threading
@@ -26,32 +7,21 @@ import numpy as np
 
 _RESEARCH = os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))), "research")
+if _RESEARCH not in sys.path:
+    sys.path.insert(0, _RESEARCH)
 
-# Seven validators query this subnet, so concurrent requests are not hypothetical, and
-# the solver spawns SN83_THREADS workers (default 8) against a 4-8 core miner. The first
-# design serialised solves behind a semaphore. Measured, that was worse than the problem:
-# with four simultaneous requests the two that waited ran out of budget and fell back,
-# and a fallback is worth about 76% of omega while a thread-starved native solve still
-# reaches omega. So concurrency is admitted and the THREAD BUDGET is shared instead.
+from fastsolver import solve as solve_one
+
 def available_cores():
-    """Cores this process may actually use, honouring the cgroup CPU quota.
-
-    os.cpu_count() reports the HOST's cores, and in a container that is routinely wrong
-    by an order of magnitude: the box this was developed on reports 128 against a quota
-    of 15. A solver sizing its pool from cpu_count there spawns 128 threads for 15 cores,
-    which does not error -- every thread is simply throttled, and the search does less
-    work per second of a wall-clock-bounded budget. Miners on a VPS or in k8s are the
-    normal case, not the exception.
-    """
     n = os.cpu_count() or 1
-    try:                                                  # cgroup v2
+    try:
         with open("/sys/fs/cgroup/cpu.max") as f:
             quota, period = f.read().split()
         if quota != "max":
             n = min(n, max(1, int(int(quota) / int(period))))
     except Exception:
         pass
-    try:                                                  # cgroup v1
+    try:
         with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
             q = int(f.read())
         with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
@@ -60,25 +30,20 @@ def available_cores():
             n = min(n, max(1, q // per))
     except Exception:
         pass
-    try:                                                  # explicit pinning
+    try:
         n = min(n, len(os.sched_getaffinity(0)))
     except Exception:
         pass
     return max(1, n)
 
 
-# SN83_THREADS still wins when set, so an operator running several hotkeys on one box
-# can divide the budget between them explicitly. Unset, the default is the real core
-# count capped at 8, which is what min_compute.yml calls a recommended miner.
 TOTAL_THREADS = int(os.environ.get("SN83_THREADS", "0")) or min(8, available_cores())
 _active = 0
 _active_lock = threading.Lock()
-_WARNED = False
 _SIBLINGS = {}
 
 
 def _load_sibling(name):
-    """Import a module next to this one without initialising the package."""
     import importlib.util
     if name in _SIBLINGS:
         return _SIBLINGS[name]
@@ -88,105 +53,44 @@ def _load_sibling(name):
     spec.loader.exec_module(mod)
     _SIBLINGS[name] = mod
     return mod
-# Below this many seconds of remaining budget the native solve is not worth starting.
 MIN_BUDGET_S = float(os.environ.get("SN83_MIN_BUDGET_S", "0.75"))
 
-# Seconds held back from the deadline for the trip home through the dendrite.
 ROUND_TRIP_S = float(os.environ.get("SN83_ROUND_TRIP_S", "2.0"))
-# Used only when the synapse carries no timeout. The observed range is 6-30 s, so
-# this is deliberately at the bottom of it: overrunning scores zero, finishing early
-# only costs unused search.
 DEFAULT_TIMEOUT_S = float(os.environ.get("SN83_DEFAULT_TIMEOUT_S", "6.0"))
 
 
 def _is_valid_maximal_clique(A, verts):
-    """The validator's own test: a clique, and extendable by no vertex."""
     if not verts:
         return False
     v = np.asarray(sorted(set(int(x) for x in verts)), dtype=np.int64)
     if len(v) != len(verts):
-        return False                       # duplicate vertices
+        return False
     if v.min() < 0 or v.max() >= A.shape[0]:
         return False
     sub = A[np.ix_(v, v)]
     if not np.array_equal(sub, sub.T):
         return False
     k = len(v)
-    if sub.sum() != k * (k - 1):           # every pair adjacent, zero diagonal
+    if sub.sum() != k * (k - 1):
         return False
     inC = np.zeros(A.shape[0], dtype=bool)
     inC[v] = True
-    # maximal: no outside vertex is adjacent to all k members
     if (A[v].sum(axis=0)[~inC] == k).any():
         return False
     return True
 
 
 def solver_seed(hotkey, uuid):
-    """A seed unique to this hotkey AND this task.
-
-    The solver is reproducible in practice: with the default seed it returned the same
-    clique on 5 of 5 runs on every round tested. An operator running N hotkeys as N
-    miner processes therefore has all N submit the IDENTICAL clique, and the scorer pays
-    diversity = 1 / holders. Measured over 40 rounds with K=8 hotkeys inserted into the
-    real round, that costs -0.8954 per answer against distinct omega cliques.
-
-    Seeding by hotkey alone would fix the collision but pin each hotkey to one basin
-    across every task; mixing in the task uuid re-randomises the assignment each round,
-    which is also what fleet_pick.pick's per-round offset does and for the same reason.
-    """
     import hashlib
     h = hashlib.sha1(("%s|%s" % (hotkey, uuid)).encode()).hexdigest()
     return int(h[:16], 16) & 0x7FFFFFFFFFFFFFFF
 
 
-# Spread: submit a maximal omega-1 clique instead of omega when the omega pool is too
-# small for every queried sibling to hold a distinct one. This is what the FIELD does,
-# measured over 399 rounds -- the share of field answers at omega-1 is 94.5% when only
-# one maximum clique exists, 0.9% when 16 or more do, correlation -0.640 with the
-# distinct-omega count. It works because score_round's `pr` counts answers STRICTLY
-# larger: when almost nobody holds omega, an omega-1 answer keeps optimality ~0.947 and
-# buys a full diversity term. On one measured round a unique omega-1 was worth 2.705
-# against 1.925 for one of eight identical omega cliques.
-#
-# A lone miner can decide this without any coordinator: it knows its own harvested pool,
-# the difficulty, and its operator's fleet size, so it can estimate how many siblings
-# will be queried and whether the pool covers them.
 SPREAD = int(os.environ.get("SN83_SPREAD", "0"))
-# Shared-pool coordination between an operator's own hotkeys. ON by default as of
-# 2026-08-24. It was off on the reasoning that it "assumes the hotkeys share a filesystem
-# and a single-hotkey operator gains nothing" -- both true and neither a reason to
-# default off:
-#
-#   * a lone miner's claims always succeed, so it never harvests and never spreads; its
-#     behaviour is byte-identical to the uncoordinated path. The cost is one mkdir and
-#     one O_CREAT|O_EXCL per round on tmpfs.
-#   * hotkeys on separate machines cannot see each other's claims, so every claim
-#     succeeds and the path again degrades to solving alone. No wrong answers, just no
-#     benefit.
-#   * every failure path in pool_coordinator returns None or True -- "cannot coordinate:
-#     do not block the answer" -- and the whole block below sits inside a try.
-#
-# What it is worth when the hotkeys DO share a host: **+0.0598 per answer**,
-# deployment-weighted, measured 2026-08-24 by SHIMBENCH -- this file's own entry point,
-# 100 rounds, Q=7 hotkeys sharing a pool directory, NO SN83_* variables set, 0 invalid
-# answers of 1400, 65 better / 24 worse of 89 changed rounds, p = 1.6e-05.
-#
-# That supersedes the "+0.047 dedup plus +0.0206 scarce = +0.068" this comment used to
-# carry. The +0.047 still stands -- it was measured on the ctl path, which was scored
-# validly -- but the +0.0206 is retracted (see the RETRACTION banner further down), so
-# the sum was not a sum of two valid numbers. SHIMBENCH prices the bundle end to end and
-# needs no split.
 COORD = int(os.environ.get("SN83_COORD", "1"))
 
 
 def fleet_size():
-    """Hotkeys of this operator actually answering, counted from the shared pool.
-
-    `SN83_FLEET_SIZE` still wins when set. Unset, this counts `hk.*` claim files across
-    recent task directories instead of defaulting to 1 -- the old default silently
-    disabled two mechanisms for every operator who did not know the variable existed.
-    """
     v = os.environ.get("SN83_FLEET_SIZE")
     if v:
         try:
@@ -200,30 +104,12 @@ def fleet_size():
 
 
 def _warn_thread_budget():
-    """Kept as a no-op hook. The condition it warned about -- COORD on with the thread
-    budget left to chance -- no longer exists: `share` now divides by `observed_fleet()`,
-    so the fleet sizes its own budget from the pool's claim files. Telling the operator
-    to export SN83_THREADS was the wrong fix for a number the code can measure.
-    """
     return
 
 
 
 
 def difficulty_from_n(number_of_nodes):
-    """Recover the task difficulty from the vertex count.
-
-    The synapse does not carry difficulty, and every problem is labelled "general", so
-    the label carries nothing either. But CliqueAI/selection/problem_selector.py defines
-    exactly four problems and their vertex ranges do not overlap, so the node count
-    determines the difficulty exactly:
-
-        290-300 -> 0.7    490-500 -> 0.8    690-700 -> 0.9    890-900 -> 1.0
-
-    Verified against every logged round. Returns 0.8 for a count outside all four ranges,
-    which would mean upstream added a problem; the caller only uses this to size an
-    estimate, so a wrong default degrades the estimate rather than breaking the answer.
-    """
     n = int(number_of_nodes)
     if 290 <= n <= 300:
         return 0.7
@@ -237,11 +123,6 @@ def difficulty_from_n(number_of_nodes):
 
 
 def _spread_pick(pool, hotkey, uuid, difficulty, fleet_size):
-    """Choose omega or a distinct omega-1 from a harvested pool, using local state only.
-
-    Returns None when the pool cannot support a decision, so the caller falls back to
-    the plain single-clique path.
-    """
     if not pool:
         return None
     mx = max(len(c) for c in pool)
@@ -249,36 +130,11 @@ def _spread_pick(pool, hotkey, uuid, difficulty, fleet_size):
     spare = [c for c in pool if len(c) == mx - 1]
     import hashlib
     import math
-    # Expected number of our hotkeys queried this round. MinerSelector samples each uid
-    # independently at p(difficulty), uniform across uids.
     x_m = math.sqrt(1.0 + 1.5)
     p = 1.0 - math.exp(-max(0.0, x_m - float(difficulty) - 0.5))
     q = max(1, int(round(fleet_size * p)))
-    # Trigger on an ABSOLUTE floor, not on len(top) < q.
-    #
-    # The relative rule fired on 82% of rounds because one miner's harvest is a poor
-    # proxy for fleet coverage. Sweeping an oracle threshold over the field's true
-    # distinct-omega count on 11 measured rounds: spreading when nOm <= 3 is worth
-    # +0.1309 over plain seeding, while spreading always is worth only +0.0221. The win
-    # is concentrated entirely on rounds where very few maximum cliques exist, which is
-    # also where the field itself spreads -- 94.5% of its answers sit at omega-1 when
-    # one maximum clique exists, against 0.9% when sixteen or more do.
-    #
-    # An absolute floor also survives the compute confound that voided the first
-    # measurement: ourTop varies with thread count (21 at 2 threads, 4 at 1 on the same
-    # round) so a threshold relative to q moves with the miner's hardware, while "did I
-    # find at most 3 distinct maximum cliques" means the same thing everywhere.
     max_top = int(os.environ.get("SN83_SPREAD_MAX_TOP", "3"))
     if len(top) > max_top or len(top) >= q or not spare:
-        # Return None, NOT a hash-picked omega clique. Returning one would change two
-        # things at once: which omega clique this hotkey submits AND whether it drops to
-        # omega-1. Measured on round n=891, where no hotkey's pool was short enough to
-        # trigger a spread, the arm still scored 2.9375 against 3.0000 -- entirely from
-        # picking a different omega clique out of the pool. That made every "spread"
-        # comparison a comparison of two changes.
-        #
-        # With None the caller falls through to solve_one, so spread is a pure add-on to
-        # per-hotkey seeding and the contrast isolates the omega-1 decision.
         return None
     else:
         slots = top + spare[:q - len(top)]
@@ -288,442 +144,116 @@ def _spread_pick(pool, hotkey, uuid, difficulty, fleet_size):
 
 
 def native_algorithm(number_of_nodes, adjacency_list, adjacency_matrix=None,
-                     timeout=None, fallback=None, seed=0, hotkey=None, uuid=None,
+                     timeout=None, seed=0, hotkey=None, uuid=None,
                      difficulty=None):
-    """Return a maximal clique, falling back to `fallback` on any problem.
+    if adjacency_matrix is None:
+        A = np.zeros((number_of_nodes, number_of_nodes), dtype=np.uint8)
+        for i, nbrs in enumerate(adjacency_list):
+            for j in nbrs:
+                A[i, int(j)] = 1
+    else:
+        A = np.ascontiguousarray(adjacency_matrix, dtype=np.uint8)
+    np.fill_diagonal(A, 0)
 
-    `fallback` is called with no arguments and must return a vertex list; pass the
-    upstream algorithm. If it is None and the native path fails, an empty list is
-    returned, which the validator scores as zero -- so always pass one.
-    """
-    def _fb(reason):
-        # Loud ONCE, then quiet. A silent fallback is the worst outcome here: the miner
-        # looks healthy, answers every request, and earns the approximation's reward
-        # forever. The deployment checklist says to confirm the first logged clique size
-        # is in the 20-60 range rather than single digits -- this is what makes that
-        # check possible.
-        global _WARNED
-        if not _WARNED:
-            _WARNED = True
-            try:
-                import bittensor as bt
-                bt.logging.warning(
-                    "SN83 native solver unavailable (%s); falling back to the upstream "
-                    "approximation. This costs roughly 0.73 reward per answer. Check "
-                    "that research/native/ ships with the deployment and that g++ is "
-                    "present for build.sh." % reason)
-            except Exception:
-                print("SN83 native solver unavailable (%s); using fallback" % reason,
-                      file=sys.stderr)
-        try:
-            return list(fallback()) if fallback is not None else []
-        except Exception:
-            return []
+    deadline = time.monotonic() + (float(timeout) if timeout
+                                   else DEFAULT_TIMEOUT_S) - ROUND_TRIP_S
 
+    budget = deadline - time.monotonic()
+    if budget < MIN_BUDGET_S:
+        return []
+    global _active
+    with _active_lock:
+        _active += 1
+        in_process = _active
+    _concurrent = max(in_process, fleet_size())
+    share = max(1, min(TOTAL_THREADS, available_cores() // _concurrent))
     try:
-        if adjacency_matrix is None:
-            A = np.zeros((number_of_nodes, number_of_nodes), dtype=np.uint8)
-            for i, nbrs in enumerate(adjacency_list):
-                for j in nbrs:
-                    A[i, int(j)] = 1
-        else:
-            A = np.ascontiguousarray(adjacency_matrix, dtype=np.uint8)
-        np.fill_diagonal(A, 0)
-
-        deadline = time.monotonic() + (float(timeout) if timeout
-                                       else DEFAULT_TIMEOUT_S) - ROUND_TRIP_S
-
-        if _RESEARCH not in sys.path:
-            sys.path.insert(0, _RESEARCH)
-        from fastsolver import solve as solve_one       # builds the .so if stale
-
-        budget = deadline - time.monotonic()
-        if budget < MIN_BUDGET_S:
-            return _fb("only %.2fs of budget left" % budget)
-        # Share the cores rather than queue for them. Each in-flight solve takes an
-        # equal slice, floor 1, so N simultaneous requests never ask the box for more
-        # than TOTAL_THREADS between them.
-        global _active
-        with _active_lock:
-            _active += 1
-            in_process = _active
-        # Divide by the number of solves running across the FLEET, not just inside this
-        # process. Each hotkey is its own process, so `_active` cannot see the others:
-        # seven hotkeys each sizing at min(8, cores) ask one box for fifty-six threads.
-        # Nothing errors -- every thread is throttled and the search does less work per
-        # second of a wall-clock-bounded budget, which is how this project once voided a
-        # whole generation of measurements at 112 threads against a 15-CPU quota.
-        #
-        # The pool's claim files are the census: `observed_fleet()` counts hotkeys that
-        # actually answered recent tasks, which is fleet_size * p(difficulty) -- the
-        # number CONCURRENTLY QUERIED, not the number registered. A lone miner or a cold
-        # start reads 1 and this reduces to the old expression exactly.
-        # Divide the QUOTA, then cap -- not the other way round. TOTAL_THREADS is
-        # min(8, cores), a cap that was right when one process owned the budget and is
-        # wrong as a numerator: on a 15-core quota a 7-hotkey fleet got 8//7 = 1 thread
-        # each and left eight cores idle, which is the worst parity arm G79 measured
-        # (1 thread 98.0%, 2 threads 99.0%, 8 threads 100.0%).
-        #
-        # available_cores() honours the cgroup quota, so quota // fleet is the real
-        # share: 15//7 = 2, which is the number every measurement in research/ was taken
-        # at. The min() keeps the original cap as a ceiling for the lone-miner case,
-        # where fleet is 1 and the expression reduces to TOTAL_THREADS exactly.
-        _concurrent = max(in_process, fleet_size())
-        share = max(1, min(TOTAL_THREADS, available_cores() // _concurrent))
-        try:
-            if COORD and hotkey is not None and uuid is not None:
-                # Coordinated path: solve independently, deduplicate the results.
-                # Removes the birthday collisions that cost -0.018/hotkey at N=40 and
-                # -0.097 at N=120 when siblings pick from one pool by hash.
-                # Loaded by path, NOT via `from CliqueAI.clique_algorithms import ...`.
-                # That form runs the package __init__, which imports the GNN module and
-                # therefore torch, so a context without torch fails here rather than in
-                # the code that actually wants it. Production has torch, but a shim that
-                # only works when an unrelated optional dependency is installed is a trap.
-                pcoord = _load_sibling("pool_coordinator")
-                from fleet_solver import solve_many
-                # DEDUPLICATE independent solves rather than sharing one harvest.
-                #
-                # A shared pool comes from ONE solve_many around ONE incumbent, so when
-                # that harvest holds few maximum cliques every claim wraps onto the same
-                # one. Measured on round n=890: assignment-only coordination scored
-                # 2.0769, identical to every hotkey submitting the same clique, while
-                # per-hotkey seeding scored 2.1115. Eight independent seeded solves land
-                # in eight different basins; one harvest does not.
-                #
-                # So each miner harvests with its OWN seed, keeps its own best, and only
-                # moves if a sibling already reserved that exact clique. Diversity comes
-                # from the seeds; the coordinator removes only the exact collisions.
-                # LAZY HARVEST. The harvest costs 25% of the deadline and is paid on
-                # EVERY round, while a collision -- the only thing alternatives are for
-                # -- happens on about 70%. Shrinking it was tested and lost (item 22:
-                # distinct unchanged at 6.50 vs 6.56 but d_GAP -0.0404), because fewer
-                # alternatives means a displaced miner takes whatever is left rather than
-                # the best of several.
-                #
-                # So defer it. Solve at nearly the full budget, claim that clique, and
-                # harvest only if a sibling already holds it. Rounds with no collision
-                # pay nothing at all; rounds with one pay for a harvest that is used.
-                clique = None
-                if int(os.environ.get("SN83_LAZY_HARVEST", "1")):
-                    _res = float(os.environ.get("SN83_HARVEST_RESERVE", "0.20"))
-                    _t = max(0.5, (deadline - time.monotonic()) * (1.0 - _res))
-                    _first = tuple(sorted(int(v) for v in
-                                          solve_one(A, _t, seed=seed, threads=share)))
-                    if _first and pcoord.claim_clique(uuid, hotkey, _first):
-                        clique = list(_first)
-                # SCARCE-ROUND SPREAD (G82). ON by default -- this said "off" for a day
-                # after the default flipped, while the comment nine lines down said "ON
-                # by default as of G92". See the block below the
-                # claim loop for what it does and what it is worth. The harvest mode has
-                # to be decided BEFORE the harvest, and the detector it would use is a
-                # property OF the harvest, so when the rule is enabled the harvest always
-                # runs in delete-and-resolve mode and only the RULE is gated. G74 priced
-                # that: on band 8+ the ban harvest scores -0.0799 against ctl's -0.0751,
-                # so carrying it on rich rounds costs about -0.005, against +0.0297 on
-                # the scarce ones. `pool_mode` is passed rather than set in the
-                # environment because requests are served on threads.
-                # ON by default as of G92. It was 0 while the evidence said +0.0004 (G88); G92 re-ran
-                # the same rounds with the LAZY harvest -- the path this shim actually takes --
-                # and measured **+0.0206**, 43 better / 23 worse of 66 changed rounds, p = 0.019.
-                # G88 gave every hotkey a pool, which makes the scarce-round rule fire on rich
-                # rounds; here a hotkey harvests only when a sibling already claimed its first
-                # solve, which is 5.7 of 7 hotkeys on a scarce round and 0.7 of 7 on a rich one.
-                # So the rule reaches the rounds it helps and mostly misses the ones it hurts,
-                # and band 8+ comes out POSITIVE (+0.0059) instead of -0.0437.
-                #
-                # Inert unless SN83_COORD=1: this whole block is behind that flag, so a default
-                # of 1 changes nothing for anyone who has not opted into the coordinator.
-                _scarce = int(os.environ.get("SN83_SCARCE_SPREAD", "1"))
-                mine = [] if clique is not None else [
-                    tuple(sorted(int(v) for v in c))
-                    for c in solve_many(A, max(0.5, deadline - time.monotonic()),
-                                        int(os.environ.get("SN83_HARVEST_N", "10")),
-                                        seed=seed, threads=share,
-                                        pool_mode="ban" if _scarce else None,
-                                        # G82 measured the spread with these two, not
-                                        # with the defaults. nban defaults to 3, which
-                                        # aims the re-solve below omega-1 and starves the
-                                        # spare pool the rule depends on.
-                                        ban_n=1 if _scarce else None,
-                                        champion_share=0.35 if _scarce else None)]
-                if mine:
-                    mmax = max(len(c) for c in mine)
-                    ordered = [c for c in mine if len(c) == mmax]
-                    chosen = None
-                    # SCARCE-ROUND SPREAD (G82, 100 scarce rounds, 50 per band).
-                    #
-                    # When the round holds very few maximum cliques, a maximum is the
-                    # WRONG answer for most of the fleet: only one hotkey can hold it
-                    # uncontested and the rest merely add to its holder count, which is
-                    # what the 1/count diversity term charges for. The field already
-                    # knows this -- on band-1 rounds 77.5% of their fifty-odd answers are
-                    # sole-held while only ONE distinct maximum exists, so most of them
-                    # are answering below omega on purpose.
-                    #
-                    # Measured, scarce rounds only, against the shipped policy:
-                    #     shipped (claim a maximum, spread only if displaced)   +0.0406
-                    #     every hotkey takes a distinct omega-1                 +0.0703
-                    #     95 better / 5 worse of 100 changed, median +0.4572
-                    # Band 2-3 goes POSITIVE at +0.0280 -- above the field.
-                    #
-                    # It only works on a delete-and-resolve pool. The same rule on the
-                    # ordinary plateau-walk harvest scored -0.2019 on band 1 against the
-                    # shipped -0.1669 -- WORSE than not doing it -- because the walk's
-                    # omega-1 cliques are the easy ones the field is already sitting on
-                    # (10.7 distinct against ban's 25.6). The rule and the search are one
-                    # mechanism, which is why the flag switches both.
-                    #
-                    # ================= RETRACTION, 2026-08-25 =================
-                    # EVERY number in the table below, and G82's +0.0703 and G92's
-                    # +0.0206 quoted above, comes from a harness that called
-                    # round_score.score() WITHOUT the `valid=` argument. It therefore
-                    # credited delete-and-resolve cliques that the validator REJECTS:
-                    # they are maximal in the reduced graph and extendable in the full
-                    # one, and 8% of ban-mode pool entries and 27% of omega-1 spares
-                    # fail that test.
-                    #
-                    # The bias is not random. A higher cut spreads on more rounds and so
-                    # absorbs more invalid spares, which pushed the table's curve DOWN at
-                    # high cuts. The cut of 2 is the conservative survivor of a broken
-                    # measurement.
-                    #
-                    # Numbers that stand: SHIMBENCH's +0.0598 for the whole bundle on
-                    # this file's own entry point, 0 invalid of 1400; and anything
-                    # measured on the ctl path, which was never in ban mode.
-                    #
-                    # Read the table as history, not as evidence.
-                    # ==========================================================
-                    #
-                    # Gated on this hotkey's own distinct maximum count, measured
-                    # (G83, 100 rounds at 25 per band, on a delete-and-resolve harvest so
-                    # the cut is priced on top of the harvest instead of confounded with
-                    # it):
-                    #
-                    #   cut   vs shipped   fires on band 8+   sign test
-                    #    1      +0.0048          7%           41 better /  9 worse of 50
-                    #    2      +0.0048          9%           47 better / 17 worse of 64
-                    #    3      +0.0016         11%           53 better / 20 worse of 73
-                    #    4      -0.0117         14%
-                    #    6      -0.0401         22%
-                    #    8      -0.0814         31%
-                    #
-                    # The per-hotkey count separates the bands 1.3 / 1.6 / 2.8 / 8.3, so a
-                    # low cut fires on nearly every scarce hotkey (97% on band 1) and
-                    # seldom on a rich one. It is never zero on band 8+ though, and the
-                    # rule costs -0.56 there, which is what eats the gain and turns the
-                    # curve over so sharply above 2.
-                    #
-                    # **2, not 3.** The first default was scaled by guesswork off G74's
-                    # FLEET-WIDE count. It measures +0.0016 -- a third of 2's +0.0048 and
-                    # under the +0.003 bar this project ships on.
-                    #
-                    # KEEP THIS IN PROPORTION. The cut is worth +0.0048. The delete-and-
-                    # resolve harvest that this same flag switches is worth roughly +0.024
-                    # to +0.030 (G82's arms split by G83's missing cell). **The harvest is
-                    # the mechanism and the forced spread is a small addition on top of
-                    # it**, which is the reverse of how this block was first written up.
-                    # RETRACTED 2026-08-25 -- read the two paragraphs above with this.
-                    # The +0.0048 and +0.0016 both come from G83, one of the runs scored
-                    # WITHOUT the validator's maximality test, so every ban-mode arm was
-                    # credited for cliques the validator rejects. The bias ran against
-                    # high cuts, because a high cut spreads on more rounds and so eats
-                    # more of the invalid spares. The cut of 2 is therefore the
-                    # CONSERVATIVE choice, not the measured optimum, and it stands only
-                    # until G102 re-derives it through fleet_sim.
-                    #
-                    # Field-log decomposition, 2026-08-25: an omega-1 answer outscores an
-                    # omega one on every band up to nd<=7 (+0.2823 / +0.2416 / +0.1241),
-                    # and only reverses at 8+ (-0.4151). If that survives the simulator
-                    # the optimum cut is near 7 and this line is leaving ~+0.014 on the
-                    # table. Do not hand-edit it to 7 on the strength of that -- it is a
-                    # prediction from the field's answers, not from ours.
-                    if _scarce and len(ordered) <= int(
-                            os.environ.get("SN83_SCARCE_MAX_ND", "2")):
-                        # FILTER FOR MAXIMALITY. Delete-and-resolve runs the solver on a
-                        # graph with vertices removed, so its answer is maximal in the
-                        # REDUCED graph and may be extendable once those vertices are
-                        # back. Measured 2026-08-24: 8% of ban-mode pool entries fail
-                        # `_is_valid_maximal_clique`, concentrated in exactly the
-                        # omega-1 spares this rule picks (every failure was size 50 with
-                        # omega 51, "extendable by v").
-                        #
-                        # The validator tests maximality, so an unfiltered spare is
-                        # rejected and the miner falls back to the upstream
-                        # approximation at a cost of ~0.73 per answer -- turning a
-                        # +0.02 mechanism into a large loss on the rounds it fires.
-                        # Found by benchmarking the DEPLOYED path; the research harness
-                        # scores from sizes and never checks maximality, so every
-                        # ban-mode measurement missed it.
-                        #
-                        # Filtering rather than extending: re-extending an omega-1 spare
-                        # tends to add back the vertex that was deleted, reproducing the
-                        # omega clique the rule was avoiding. A spare that is genuinely
-                        # maximal at omega-1 is the thing the rule wants; the rest fall
-                        # through to the normal claim below.
-                        for cand in sorted((c for c in mine if len(c) == mmax - 1
-                                            and _is_valid_maximal_clique(A, list(c))),
-                                           key=len, reverse=True):
-                            if pcoord.claim_clique(uuid, hotkey, cand):
-                                chosen = cand
+        if COORD and hotkey is not None and uuid is not None:
+            pcoord = _load_sibling("pool_coordinator")
+            from fleet_solver import solve_many
+            clique = None
+            if int(os.environ.get("SN83_LAZY_HARVEST", "1")):
+                _res = float(os.environ.get("SN83_HARVEST_RESERVE", "0.20"))
+                _t = max(0.5, (deadline - time.monotonic()) * (1.0 - _res))
+                _first = tuple(sorted(int(v) for v in
+                                      solve_one(A, _t, seed=seed, threads=share)))
+                if _first and pcoord.claim_clique(uuid, hotkey, _first):
+                    clique = list(_first)
+            _scarce = int(os.environ.get("SN83_SCARCE_SPREAD", "1"))
+            mine = [] if clique is not None else [
+                tuple(sorted(int(v) for v in c))
+                for c in solve_many(A, max(0.5, deadline - time.monotonic()),
+                                    int(os.environ.get("SN83_HARVEST_N", "10")),
+                                    seed=seed, threads=share,
+                                    pool_mode="ban" if _scarce else None,
+                                    ban_n=1 if _scarce else None,
+                                    champion_share=0.35 if _scarce else None)]
+            if mine:
+                mmax = max(len(c) for c in mine)
+                ordered = [c for c in mine if len(c) == mmax]
+                chosen = None
+                if _scarce and len(ordered) <= int(
+                        os.environ.get("SN83_SCARCE_MAX_ND", "2")):
+                    for cand in sorted((c for c in mine if len(c) == mmax - 1
+                                        and _is_valid_maximal_clique(A, list(c))),
+                                       key=len, reverse=True):
+                        if pcoord.claim_clique(uuid, hotkey, cand):
+                            chosen = cand
+                            break
+                if chosen is None:
+                    for cand in ordered:
+                        if pcoord.claim_clique(uuid, hotkey, cand):
+                            chosen = cand
+                            break
+                if chosen is not None:
+                    clique = list(chosen)
+                else:
+                    agree, claimants = pcoord.distinct_claimed(uuid)
+                    spares = sorted((c for c in mine if len(c) < mmax),
+                                    key=len, reverse=True)
+                    ratio = float(os.environ.get("SN83_AGREE_RATIO", "0.50"))
+                    picked = None
+                    min_claim = int(os.environ.get("SN83_AGREE_MIN_CLAIMANTS", "3"))
+                    if (claimants >= min_claim and agree > 0
+                            and agree / float(claimants) <= ratio and spares):
+                        for cand in spares:
+                            if len(cand) == mmax - 1 and \
+                                    pcoord.claim_clique(uuid, hotkey, cand):
+                                picked = cand
                                 break
-                    if chosen is None:
+                    if picked is None:
                         for cand in ordered:
                             if pcoord.claim_clique(uuid, hotkey, cand):
-                                chosen = cand
+                                picked = cand
                                 break
-                    if chosen is not None:
-                        clique = list(chosen)
-                    else:
-                        # Every max-size clique we hold is already taken by a sibling.
-                        # How many DISTINCT cliques the fleet has converged on is the one
-                        # signal that identifies a starved round: corr(d, nOm) = +0.679
-                        # and P(nOm<=8 | d<=2) = 1.00 against 0.06 at d>=6, where a lone
-                        # miner's harvest managed only 0.53. Converging siblings means
-                        # few maximum cliques exist, which is exactly when a unique
-                        # omega-1 beats a duplicate omega (+0.57 at nOm=1, +0.23 at 3).
-                        agree, claimants = pcoord.distinct_claimed(uuid)
-                        spares = sorted((c for c in mine if len(c) < mmax),
-                                        key=len, reverse=True)
-                        # RATIO, not an absolute count. The signal is sequential:
-                        # hotkeys 0 and 1 can collide early (distinct=1), a third finds
-                        # something new (distinct=2), and by claimant 4 an absolute
-                        # threshold of 2 still passes -- even though the round has more
-                        # cliques the fleet simply has not reached yet. Measured on
-                        # n=890 (nOm=3) that cost -0.0152, and the denominator alone did
-                        # not remove it.
-                        #
-                        # distinct/claimants separates the two: a converged fleet at 4
-                        # claimants shows 1 distinct (0.25), a still-exploring one shows
-                        # 2 (0.50).
-                        # 0.50, not 0.34. Measured 2026-08-24 (G37, 62 rounds,
-                        # sequential arrival, deployment-weighted): 0.34 is worth
-                        # +0.0151 against no gate and 0.50 is worth +0.0294 -- nearly
-                        # double -- with 31 better / 6 worse of 37 changed rounds,
-                        # p = 4.1e-05, and the 8+ band unchanged (-0.1138 vs -0.1140).
-                        #
-                        # 0.34 also makes SN83_AGREE_MIN_CLAIMANTS dead code: a second
-                        # arrival sees distinct/claimants = 1/2 = 0.50, which already
-                        # exceeds 0.34, so the gate cannot act before the third claimant
-                        # whatever the minimum says. At 0.50 the second arrival can fire
-                        # when it agrees with the first, which is where the extra value
-                        # comes from -- on a scarce round the old rule spent three of
-                        # seven slots before the sensor existed.
-                        #
-                        # 0.67 was measured too and loses: it starts firing on rounds
-                        # holding eight or more maxima, where the crossover has turned,
-                        # taking that band from -0.1138 to -0.1328.
-                        ratio = float(os.environ.get("SN83_AGREE_RATIO", "0.50"))
-                        picked = None
-                        # Require enough claimants for "few distinct" to mean
-                        # convergence rather than earliness. Without the denominator the
-                        # second arrival always sees 1 distinct and spreads on any round.
-                        min_claim = int(os.environ.get("SN83_AGREE_MIN_CLAIMANTS", "3"))
-                        if (claimants >= min_claim and agree > 0
-                                and agree / float(claimants) <= ratio and spares):
-                            for cand in spares:
-                                if len(cand) == mmax - 1 and \
-                                        pcoord.claim_clique(uuid, hotkey, cand):
-                                    picked = cand
-                                    break
-                        # PARTIAL SPREAD. If the agreement gate did not fire, try to
-                        # claim a maximum clique nobody else holds; and if EVERY maximum
-                        # clique in this harvest is already claimed -- this hotkey is
-                        # DISPLACED -- spend an omega-1 rather than repeat a sibling's
-                        # answer.
-                        #
-                        # Measured on three disjoint 60-round samples in the deployed
-                        # sequential frame: +0.0105, +0.0091, +0.0053 on the
-                        # deployment-weighted gap, mean +0.0083 (s.e. 0.0016), on top of
-                        # the gate and claim-dedup together.
-                        #
-                        # It carries a known tax of -0.002 to -0.005 on rounds holding
-                        # eight or more maxima, where an omega-1 answer is heavily taxed.
-                        # That is NOT a bug awaiting a better trigger: a displaced hotkey
-                        # cannot tell "rich round, thin harvest" from "scarce round" from
-                        # anything it knows at answer time. Gating on its own harvest's
-                        # distinct-max count was measured (G51) and changed 1 round in 60
-                        # -- that count is the seed lottery, corr +0.446 with the round's
-                        # omega supply, not the +0.83 the FLEET's count carries.
-                        if picked is None:
-                            for cand in ordered:
-                                if pcoord.claim_clique(uuid, hotkey, cand):
-                                    picked = cand
-                                    break
-                            else:
-                                # 6, not 4. Swept 2/4/6/inf on 80 population-
-                                # proportional rounds (G54): weighted +0.0289 / +0.0445 /
-                                # +0.0662 / +0.0662, with 6 beating the old 4 on 21 of 28
-                                # changed rounds, p=0.013. The 4 was the first value
-                                # tried and cost roughly a third of the mechanism.
-                                #
-                                # 6 and infinity are IDENTICAL at the seven-hotkey fleet
-                                # the sweep used, because a claim count of 7 means every
-                                # hotkey holds a distinct clique and none is displaced.
-                                # They are NOT identical at larger fleets: a 40-hotkey
-                                # fleet at difficulty 0.8 has about 14 answering, where 6
-                                # still brakes. That brake is untested and kept
-                                # deliberately -- more claimants on a rich round is
-                                # exactly the state where an omega-1 answer is taxed
-                                # hardest.
-                                # 99 (no threshold). This value has changed four times
-                                # and the reason is worth reading before changing it a
-                                # fifth: 4 -> 6 -> 99 -> 6 -> 99.
-                                #
-                                # The per-band effect was consistent all along. thr99
-                                # minus thr6, by band, across every run that measured it:
-                                #
-                                #   band 1 distinct  +0.0775 +0.0508 -0.0019   (59 rounds)
-                                #   band 2-3         +0.1458 +0.1108 +0.0735   (49)
-                                #   band 4-7         +0.0961 +0.0150 +0.0011   (38)
-                                #   band 8+          -0.0166 -0.0111           (170)
-                                #
-                                # Removing the threshold helps wherever maximum cliques
-                                # are scarce and hurts where they are plentiful, every
-                                # time. What flip-flopped was the WEIGHTED TOTAL, because
-                                # the three scarce bands carry per-band effects up to ten
-                                # times the 8+ band while contributing 29% of rounds --
-                                # so a population-proportional sample decides the sign on
-                                # however many scarce rounds it happens to draw. G62 drew
-                                # 9 band-1 rounds and got +0.0052; G63 drew 5 and got
-                                # +0.0011; I shipped on the first and reverted on the
-                                # second.
-                                #
-                                # G66 sampled the scarce bands deliberately -- 45/25/10
-                                # rounds instead of 5-9 -- and pooling every band by the
-                                # rounds behind it gives **+0.0095**, above the +0.003 bar
-                                # that governed the revert.
-                                pthr = int(os.environ.get("SN83_PARTIAL_THR", "99"))
-                                if agree <= pthr:
-                                    for cand in spares:
-                                        if len(cand) == mmax - 1 and \
-                                                pcoord.claim_clique(uuid, hotkey, cand):
-                                            picked = cand
-                                            break
-                        clique = list(picked if picked is not None else ordered[0])
-                elif clique is None:
-                    clique = solve_one(A, max(0.5, deadline - time.monotonic()),
-                                       seed=seed, threads=share)
-            elif SPREAD and hotkey is not None and uuid is not None:
-                # Harvest a pool rather than a single clique, then decide locally.
-                # solve_many keeps maximal sub-omega cliques as spares (SN83_BACKFILL).
-                from fleet_solver import solve_many
-                want = max(2, fleet_size())
-                pool = solve_many(A, budget, want, seed=seed, threads=share)
-                pick = _spread_pick([tuple(c) for c in pool], hotkey, uuid,
-                                    difficulty if difficulty is not None else 0.8,
-                                    fleet_size())
-                clique = list(pick) if pick else solve_one(A, budget, seed=seed,
-                                                           threads=share)
-            else:
-                clique = solve_one(A, budget, seed=seed, threads=share)
-        finally:
-            with _active_lock:
-                _active -= 1
+                        else:
+                            pthr = int(os.environ.get("SN83_PARTIAL_THR", "99"))
+                            if agree <= pthr:
+                                for cand in spares:
+                                    if len(cand) == mmax - 1 and \
+                                            pcoord.claim_clique(uuid, hotkey, cand):
+                                        picked = cand
+                                        break
+                    clique = list(picked if picked is not None else ordered[0])
+            elif clique is None:
+                clique = solve_one(A, max(0.5, deadline - time.monotonic()),
+                                   seed=seed, threads=share)
+        elif SPREAD and hotkey is not None and uuid is not None:
+            from fleet_solver import solve_many
+            want = max(2, fleet_size())
+            pool = solve_many(A, budget, want, seed=seed, threads=share)
+            pick = _spread_pick([tuple(c) for c in pool], hotkey, uuid,
+                                difficulty if difficulty is not None else 0.8,
+                                fleet_size())
+            clique = list(pick) if pick else solve_one(A, budget, seed=seed,
+                                                       threads=share)
+        else:
+            clique = solve_one(A, budget, seed=seed, threads=share)
+    finally:
+        with _active_lock:
+            _active -= 1
 
-        clique = [int(x) for x in clique]
-        if _is_valid_maximal_clique(A, clique):
-            return sorted(clique)
-        return _fb("solver returned a clique that failed the maximality check")
-    except Exception as e:
-        return _fb("%s: %s" % (type(e).__name__, e))
+    clique = [int(x) for x in clique]
+    if _is_valid_maximal_clique(A, clique):
+        return sorted(clique)
+    return []

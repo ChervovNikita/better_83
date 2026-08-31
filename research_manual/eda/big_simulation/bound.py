@@ -27,6 +27,21 @@ import strategies
 from scoring import score
 
 
+def _probe_seconds(view, rnd):
+    """Returns the measured cost of evaluating one plan on this view."""
+    sizes = sorted(view, reverse=True)
+    plan = {"fresh": []}
+    for size in sizes:
+        counts = view[size]["counts"]
+        if counts:
+            plan[size] = (counts, [1] + [0] * (len(counts) - 1))
+    if len(plan) == 1:
+        return 0.0
+    started = time.time()
+    native.expected_scores(plan, rnd.difficulty, rnd.omega)
+    return max(time.time() - started, 1e-6)
+
+
 def play(rnd, g, o, cap, rng, strategy, deadline):
     """Returns one round's answer counts, means, and which solver replied."""
     q_a, q_b = rounds_module.split_queries(rnd, g, o)
@@ -41,11 +56,19 @@ def play(rnd, g, o, cap, rng, strategy, deadline):
         return q_a, q_b, mean_a, 0.0, "none"
 
     view = responders.build_view(board, rnd)
+    # Cost per candidate is NOT uniform: expected_scores enumerates contingency
+    # tables, and one call runs from 20us to seconds depending on how many
+    # distinct occupancy values the view carries. So time one representative
+    # plan and multiply by the exact plan count, rather than assuming a rate.
+    # A single candidate can outlast the deadline on its own, which is why the
+    # in-search deadline alone could not bound the round.
+    probe = _probe_seconds(view, rnd)
     # The cap only skips rounds too large to be worth starting; the deadline is
     # what actually bounds the run, and a missed deadline falls back to the
     # full-sight solver, which is the stronger opponent.
     result = None
-    if partial_module.count_candidates(view, q_b) <= cap:
+    n_plans = partial_module.count_candidates(view, q_b)
+    if n_plans * probe <= deadline and n_plans <= cap:
         result = partial_module.best_response(
             view, rnd.difficulty, q_b, rnd.omega, fleet_a=g, fleet_b=o,
             deadline=time.time() + deadline)

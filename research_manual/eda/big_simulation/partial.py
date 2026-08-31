@@ -318,9 +318,12 @@ def _search(view, difficulty, q, omega, max_fresh_stack, shape, j_cap,
                     for size, assign in zip(sizes, combo):
                         if assign is not None:
                             plan[size] = (view[size]["counts"], list(assign))
-                    checked += 1
-                    if (deadline is not None and not checked % 128
-                            and time.time() > deadline):
+                    # Checked EVERY candidate, not every N: one expected_scores
+                    # call runs from 20us to ~100ms depending on how many
+                    # distinct occupancy classes the plan has, so a batched
+                    # check turns the deadline into a suggestion. time.time()
+                    # costs ~100ns against a >=20us body.
+                    if deadline is not None and time.time() > deadline:
                         return None
                     mean_a, mean_b = native.expected_scores(plan, difficulty,
                                                             omega)

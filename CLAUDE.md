@@ -9,9 +9,8 @@ sweep, a two-round smoke. That is how most of the useful work here gets found, a
 below discourages it.
 
 But **no number enters RESULTS.md, a commit message, a shipped default, or a report to the
-user unless it came from `research/fleet_sim.py`** (or, for deployment questions, from a
-harness that calls `CliqueAI/clique_algorithms/native_algorithm_shim.native_algorithm`
-end to end). Scratch harnesses produce direction. The simulator produces numbers.
+user unless it came from `research_manual/simulate.py`**. Scratch harnesses produce
+direction. The simulator produces numbers.
 
 ### Why this rule exists
 
@@ -22,19 +21,24 @@ credited cliques the validator would have rejected — 5% of delete-and-resolve 
 and 27% of the omega-1 spares the shipped rule actually picks, each costing ~0.73 per answer
 through the fallback path.
 
-`fleet_sim.py` already had both halves and makes the mistake impossible:
+`simulate.py` makes that mistake impossible by construction: it hands the round's responses
+to the validator's own scorer rather than reimplementing it.
 
-    def score_round(sizes, valid, keys, difficulty)   # valid REQUIRED, no default
-    def validate_cliques(rec, cliques)                # the validator's own maximality test
+    calc = CliqueScoreCalculator(graph=graph, difficulty=..., responses=responses)
+    *_, rewards = calc.get_scores()
+
+It also replays the real field — every historical answer from `rounds.json` — so a number is
+a reward against the actual opponents, not against an assumed one.
 
 A default was shipped on a number from the wrong harness. The scratch tool was not wrong to
 exist; it was wrong to be the last word.
 
 ### The check, before any fast harness is trusted
 
-Diff its contract against `fleet_sim`'s and write down what is being dropped. **A parameter
+Diff its contract against `simulate.py`'s and write down what is being dropped. **A parameter
 that is REQUIRED in the existing tool and OPTIONAL in yours is not a simplification — it is
-the check you are about to skip.**
+the check you are about to skip.** In particular: anything that scores a clique without
+running the validator's maximality test is measuring a reward nobody will ever be paid.
 
 ### Corollary
 

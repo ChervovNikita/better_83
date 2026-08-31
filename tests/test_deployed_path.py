@@ -82,7 +82,7 @@ def test_deployed_path_answers_validly_with_the_coordinator_on():
         for h in range(2):
             hk = "5TestHotkey%02d" % h
             c = shim.native_algorithm(
-                rec["n"], adj, adjacency_matrix=A, timeout=3.0, fallback=lambda: [0],
+                rec["n"], adj, adjacency_matrix=A, timeout=3.0,
                 seed=shim.solver_seed(hk, uuid), hotkey=hk, uuid=uuid,
                 difficulty=rec["difficulty"])
             assert _is_maximal_clique(A, c), \
