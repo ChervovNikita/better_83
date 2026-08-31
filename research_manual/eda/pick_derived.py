@@ -607,3 +607,495 @@ def picker_level(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
         slots.extend([list(cliques[i])] * m)
     return _deal_ranked(slots[:q], hotkeys, pool, difficulty, n_top_true,
                         n_spare_true)
+
+
+def picker_edge(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Maximise our_reward MINUS theirs, not our reward alone.
+
+    The greedy pickers are a best response for our OWN score, which is the wrong
+    objective when the metric is a difference. They miss that where we stand
+    changes what the FIELD earns:
+
+        their opt = exp(-phi*rho),   phi = (F_omega + A) / n_total
+
+    so every hotkey we add at omega raises phi and cuts the optimality of every
+    answer sitting at omega-1. The derivative is
+
+        d(their opt)/dA = -(rho / n_total) * exp(-phi*rho)
+
+    and with B of their answers down at omega-1 the damage per hotkey we move is
+    B*(1+D)*rho*exp(-phi*rho)/n_total. That term is worth the most in exactly the
+    rounds TOP4's own rule makes predictable: when S < S*(D) they put EVERYTHING
+    on omega-1, so B is their whole fleet and omega is ours alone. Following them
+    down there -- which the plain greedy does, 535 hotkeys against 70 in the
+    measured N=120 rounds -- forfeits the attack entirely.
+
+    Placing at omega-1 damages nobody: it lowers phi, which HELPS them.
+    """
+    assert pool and hotkeys
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes) if n_nodes else 0.8
+    q = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega]
+    spare = [c for c in pool if len(c) == omega - 1]
+    if not top:
+        return _rotate(uuid, [list(c) for c in (spare * q)[:q]], hotkeys)
+    if not spare:
+        return _rotate(uuid, [list(c) for c in (top * q)[:q]], hotkeys)
+
+    n_top = max(int(n_top_true) or len(top), 1)
+    n_sp = max(int(n_spare_true) or len(spare), 1)
+    fn = fleet_n or infer_fleet_n(q, difficulty)
+    f_top, f_sp, _dt, _ds, n_field = forecast(difficulty, n_top, n_sp, fn)
+    rho = omega / float(omega - 1) if omega > 1 else 1.0
+    n_all = max(1.0, n_field + q)
+    lam_top = f_top / float(n_top)
+    lam_sp = f_sp / float(n_sp)
+
+    best = None
+    for a_top in range(0, q + 1):
+        phi = (f_top + a_top) / n_all
+        opt_sp = math.exp(-phi * rho)
+        k_t = min(a_top, len(top))
+        k_s = min(q - a_top, len(spare))
+        ours = 0.0
+        if k_t:
+            for m in _spread(a_top, k_t):
+                ours += m * (1.0 + difficulty) + _poisson_share(lam_top, m)
+        if k_s:
+            for m in _spread(q - a_top, k_s):
+                ours += m * ((1.0 + difficulty) * opt_sp) + _poisson_share(lam_sp, m)
+        # what the field earns, per answer, under this phi
+        theirs = (f_top * (1.0 + difficulty)
+                  + f_sp * (1.0 + difficulty) * opt_sp) / max(1.0, f_top + f_sp)
+        score = ours / q - theirs
+        if best is None or score > best[0]:
+            best = (score, a_top)
+
+    a_top = best[1]
+    slots = []
+    if a_top:
+        for i, m in enumerate(_spread(a_top, min(a_top, len(top)))):
+            slots.extend([list(top[i])] * m)
+    if q - a_top:
+        for i, m in enumerate(_spread(q - a_top, min(q - a_top, len(spare)))):
+            slots.extend([list(spare[i])] * m)
+    return _rotate(uuid, slots[:q], hotkeys)
+
+
+OMEGA_DEPTH = int(os.environ.get("SN83_OMEGA_DEPTH", "1"))
+
+
+def picker_depth(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                 n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Fill omega DEPTH-deep before spilling to spares, DEPTH from the env.
+
+    Exists to test the depth claim empirically rather than by argument. The
+    marginal algebra says depth 1: a second hotkey on a clique we alone hold takes
+    cnt 1 -> 2, so both answers get 1/2 where one got 1/1 and the clique's total
+    diversity is unchanged. The second hotkey's whole value is then the (1+D)
+    optimality term, against (1+D)*exp(-phi*rho) + 1 on a free spare -- and with
+    few of ours at omega, exp(-phi*rho) is ~0.97, so the spare keeps its full +1
+    of diversity almost for free.
+
+    If that reasoning is wrong, DEPTH=2 or 3 will beat DEPTH=1 here.
+    """
+    assert pool and hotkeys
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes) if n_nodes else 0.8
+    q = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega]
+    spare = [c for c in pool if len(c) == omega - 1]
+    if not top:
+        return _rotate(uuid, [list(c) for c in (spare * q)[:q]], hotkeys)
+
+    slots = []
+    for _ in range(OMEGA_DEPTH):
+        for c in top:
+            if len(slots) < q:
+                slots.append(list(c))
+    i = 0
+    while len(slots) < q and spare:
+        slots.append(list(spare[i % len(spare)]))
+        i += 1
+    while len(slots) < q:
+        slots.append(list(top[len(slots) % len(top)]))
+    return _rotate(uuid, slots[:q], hotkeys)
+
+
+# ---------------------------------------------------------------------------
+# Exact optimum against a single known rival.  Proof: autoresearch-runs/
+# sn83-picker/PROOF_2P.md.  Lemmas 1-3 reduce the round to a one-dimensional
+# enumeration over A_omega, with a closed-form inner solution.
+# ---------------------------------------------------------------------------
+
+def _rival_shape(difficulty, b, n_top, n_spare):
+    """(B_omega, d_B, m_top, B_spare, d_S, m_sp) from the rival's measured rule."""
+    star = TOP4_S_STAR.get(round(difficulty, 1), 3)
+    if n_top >= star:
+        d = max(1, min(int(b), n_top))
+        return b, d, b / float(d), 0.0, 1, 0.0
+    d = max(1, min(int(b), n_spare))
+    return 0.0, 1, 0.0, b, d, b / float(d)
+
+
+def _exp_share(x, q_hit, m):
+    """E[x/(x+f)] when f = m with probability q_hit and 0 otherwise."""
+    if x <= 0:
+        return 0.0
+    return (1.0 - q_hit) + q_hit * (x / float(x + m)) if m > 0 else 1.0
+
+
+def _level_value(units, n_cliques, q_hit, m):
+    """Total expected diversity from `units` hotkeys placed optimally on a level.
+
+    By Lemma 2 the optimum is an even spread over min(units, n_cliques) cliques:
+    every clique is exchangeable, so the first unit is worth the same everywhere
+    and marginals decrease with depth.
+    """
+    if units <= 0:
+        return 0.0
+    k = max(1, min(units, int(n_cliques)))
+    return sum(_exp_share(d, q_hit, m) for d in _spread(units, k))
+
+
+def optimal_split(difficulty, a, b, n_top, n_spare, omega,
+                  usable_top=None, usable_spare=None):
+    """The exact best (A_omega, A_spare) against a single known rival.
+
+    Enumerates A_omega over its whole range -- the only quantity coupling the two
+    levels, since phi depends on it -- and evaluates each with the closed-form
+    inner optimum. Returns (A_omega, total_value).
+    """
+    n = max(1.0, float(a + b))
+    rho = omega / float(omega - 1) if omega > 1 else 1.0
+    b_top, d_b, m_top, b_sp, d_s, m_sp = _rival_shape(difficulty, b, n_top, n_spare)
+    q_top = min(1.0, d_b / float(max(1, n_top))) if b_top else 0.0
+    q_sp = min(1.0, d_s / float(max(1, n_spare))) if b_sp else 0.0
+
+    best = (0, -1.0)
+    for a_top in range(0, a + 1):
+        phi = (b_top + a_top) / n
+        sigma = math.exp(-phi * rho)
+        val = (1.0 + difficulty) * (a_top + (a - a_top) * sigma)
+        val += _level_value(a_top, usable_top or n_top, q_top, m_top)
+        val += _level_value(a - a_top, usable_spare or n_spare, q_sp, m_sp)
+        if val > best[1]:
+            best = (a_top, val)
+    return best
+
+
+def picker_optimal2p(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                     n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Provably optimal against one known rival (PROOF_2P.md theorem, section 6)."""
+    assert pool and hotkeys
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes) if n_nodes else 0.8
+    a = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega]
+    spare = [c for c in pool if len(c) == omega - 1]
+    n_top = max(int(n_top_true) or len(top), 1)
+    n_sp = max(int(n_spare_true) or len(spare), 1)
+
+    fn = fleet_n or infer_fleet_n(a, difficulty)
+    prof = fleet_profile(fn)
+    b = sum(prof.values()) * selection_p(difficulty)
+
+    # The optimiser may only spread over cliques we were actually handed: the
+    # supply n_top counts what EXISTS (often 100+) but the pool carries far fewer.
+    # Feeding it the supply lets it believe it can be alone more times than it has
+    # cliques, which is the proof being given an infeasible action set.
+    a_top, _v = optimal_split(difficulty, a, b, n_top, n_sp, omega,
+                              usable_top=len(top), usable_spare=len(spare))
+    a_top = min(a_top, len(top))
+    slots = []
+    if a_top:
+        for i, mlt in enumerate(_spread(a_top, min(a_top, len(top)))):
+            slots.extend([list(top[i])] * mlt)
+    rest = a - len(slots)
+    if rest and spare:
+        for i, mlt in enumerate(_spread(rest, min(rest, len(spare)))):
+            slots.extend([list(spare[i])] * mlt)
+    while len(slots) < a:
+        slots.append(list((top or spare)[len(slots) % len(top or spare)]))
+    return _rotate(uuid, slots[:a], hotkeys)
+
+
+# ---------------------------------------------------------------------------
+# Optimal for the DIFFERENCE objective (our mean - their mean), which is the
+# metric that matters: rewards are normalised per round, so absolute score is
+# not meaningful.  Derivation in PROOF_2P.md section 10.
+#
+#   J = (1+D)(alpha - beta)(1 - sigma) + c_min[ Div_A(1/a + 1/b) - C/b ]
+#
+# with alpha = A_omega/a, beta = B_omega/b, and C the number of distinct cliques
+# ANY player uses.  Div_B = C - Div_A identically, because the answers on one
+# clique split c_min/(x+f) each and sum to 1.
+# ---------------------------------------------------------------------------
+
+def _diff_marginals(units, n_cliques, q_hit, m, a, b, cmin=1.0):
+    """Greedy value of placing `units` hotkeys on one level, for the J objective.
+
+    Marginals, all non-increasing, so greedy is exact (PROOF_2P Lemma 1):
+        fresh clique   c_min/a                      (Div_A +1, C +1)
+        occupied, load f   c_min*delta(x,f)*(1/a+1/b)   (Div_A +delta, C +0)
+    """
+    if units <= 0:
+        return 0.0
+    w_join = (1.0 / a + 1.0 / b)
+    n_occ = q_hit * n_cliques          # cliques the rival already holds
+    n_free = max(0.0, n_cliques - n_occ)
+    total = 0.0
+    left = units
+    # first pass: one hotkey on each occupied clique, and on each free clique
+    join_first = (m > 0) and ((1.0 / (1.0 + m)) * w_join > 1.0 / a)
+    order = []
+    if n_occ > 0:
+        order.append(("occ", int(n_occ), (1.0 / (1.0 + m)) * w_join if m > 0 else w_join))
+    if n_free > 0:
+        order.append(("free", int(n_free), 1.0 / a))
+    order.sort(key=lambda t: -t[2])
+    for _kind, cap, val in order:
+        take = min(left, cap)
+        total += take * val * cmin
+        left -= take
+        if left <= 0:
+            break
+    # remaining hotkeys stack; depth-2+ marginals on occupied cliques
+    if left > 0 and n_occ > 0:
+        x = 1
+        while left > 0 and x < 40:
+            d = m / ((x + m) * (x + 1.0 + m)) if m > 0 else 0.0
+            take = min(left, int(n_occ))
+            total += take * d * w_join * cmin
+            left -= take
+            x += 1
+        if left > 0:
+            total += 0.0
+    return total
+
+
+def optimal_split_diff(difficulty, a, b, n_top, n_spare, omega,
+                       usable_top=None, usable_spare=None):
+    """Exact best A_omega for J = our mean - their mean. Returns (A_omega, J)."""
+    a = max(1, int(a))
+    b = max(1e-9, float(b))
+    n = float(a) + b
+    rho = omega / float(omega - 1) if omega > 1 else 1.0
+    b_top, d_b, m_top, b_sp, d_s, m_sp = _rival_shape(difficulty, b, n_top, n_spare)
+    ut = usable_top or n_top
+    us = usable_spare or n_spare
+    q_top = min(1.0, d_b / float(max(1, n_top))) if b_top else 0.0
+    q_sp = min(1.0, d_s / float(max(1, n_spare))) if b_sp else 0.0
+    beta = b_top / b
+
+    best = (0, -1e18)
+    for a_top in range(0, a + 1):
+        n_omega = b_top + a_top
+        if n_omega <= 0:
+            sigma = 1.0            # nobody at omega: omega-1 IS max_size
+        else:
+            sigma = math.exp(-(n_omega / n) * rho)
+        alpha = a_top / float(a)
+        j = (1.0 + difficulty) * (alpha - beta) * (1.0 - sigma)
+        j += _diff_marginals(a_top, ut, q_top, m_top, a, b)
+        j += _diff_marginals(a - a_top, us, q_sp, m_sp, a, b)
+        if j > best[1]:
+            best = (a_top, j)
+    return best
+
+
+def picker_diff(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Optimal for our_mean - their_mean against one known rival."""
+    assert pool and hotkeys
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes) if n_nodes else 0.8
+    a = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega]
+    spare = [c for c in pool if len(c) == omega - 1]
+    n_top = max(int(n_top_true) or len(top), 1)
+    n_sp = max(int(n_spare_true) or len(spare), 1)
+    fn = fleet_n or infer_fleet_n(a, difficulty)
+    b = sum(fleet_profile(fn).values()) * selection_p(difficulty)
+
+    a_top, _j = optimal_split_diff(difficulty, a, b, n_top, n_sp, omega,
+                                   usable_top=len(top) or 1,
+                                   usable_spare=len(spare) or 1)
+    a_top = min(a_top, len(top)) if top else 0
+    slots = []
+    if a_top:
+        for i, mlt in enumerate(_spread(a_top, min(a_top, len(top)))):
+            slots.extend([list(top[i])] * mlt)
+    rest = a - len(slots)
+    if rest > 0 and spare:
+        for i, mlt in enumerate(_spread(rest, min(rest, len(spare)))):
+            slots.extend([list(spare[i])] * mlt)
+    while len(slots) < a:
+        pick = top or spare
+        slots.append(list(pick[len(slots) % len(pick)]))
+    return _rotate(uuid, slots[:a], hotkeys)
+
+
+def picker_proved(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                  n_top_true=0, n_spare_true=0, fleet_n=0):
+    """A_omega = min(a, |omega cliques we hold|), one each; the rest on fresh spares.
+
+    This is the optimum of J = our_mean - their_mean derived in PROOF_2P section 10
+    and verified against direct scoring (0 mismatches). Every omega-clique taken
+    once is worth c_min/a to J and denies the rival max_size; a SECOND hotkey on
+    one is worth nothing (delta(x,0)=0) while still costing every other answer of
+    ours optimality through sigma. No search, no forecast, no tuning.
+    """
+    assert pool and hotkeys
+    a = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega]
+    spare = [c for c in pool if len(c) == omega - 1]
+    slots = [list(c) for c in top[:a]]
+    i = 0
+    while len(slots) < a and spare:
+        slots.append(list(spare[i % len(spare)]))
+        i += 1
+    while len(slots) < a:
+        slots.append(list(top[len(slots) % len(top)]))
+    return _rotate(uuid, slots[:a], hotkeys)
+
+
+def picker_random_top(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                      n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Control: every hotkey on a RANDOM omega-clique from the pool."""
+    import random as _r
+    assert pool and hotkeys
+    a = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega] or pool
+    rng = _r.Random(int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16))
+    return [list(top[rng.randrange(len(top))]) for _ in range(a)]
+
+
+def picker_random_spare(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                        n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Control: every hotkey on a RANDOM omega-1 clique from the pool."""
+    import random as _r
+    assert pool and hotkeys
+    a = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    sp = [c for c in pool if len(c) == omega - 1] or pool
+    rng = _r.Random(int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16))
+    return [list(sp[rng.randrange(len(sp))]) for _ in range(a)]
+
+
+def picker_random_any(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                      n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Control: every hotkey on a random clique of ANY level in the pool."""
+    import random as _r
+    assert pool and hotkeys
+    a = len(hotkeys)
+    rng = _r.Random(int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16))
+    return [list(pool[rng.randrange(len(pool))]) for _ in range(a)]
+
+
+def _greedy_level(units, n_cliques, q_hit, m, a, b):
+    """Exact greedy on the J marginals for one level. Returns (value, depths).
+
+    Marginals (PROOF_2P section 10), all non-increasing within a clique:
+
+        free clique, 1st hotkey    1/a                  (Div_A +1, C +1)
+        free clique, 2nd+          0                    (delta(x,0)=0, C unchanged)
+        occupied,   (x+1)-th       delta(x,m)*(1/a+1/b) (C unchanged)
+
+    The previous version bucketed these and rounded the clique counts to ints,
+    which loses the interleaving between "one more free clique" and "go deeper on
+    an occupied one". Here the two streams are merged properly.
+    """
+    if units <= 0 or n_cliques <= 0:
+        return 0.0, []
+    w = 1.0 / a + 1.0 / b
+    n_occ = int(round(q_hit * n_cliques))
+    n_free = max(0, int(n_cliques) - n_occ)
+    v_free = 1.0 / a
+    total = 0.0
+    left = int(units)
+    depth = [0] * max(1, n_occ)
+    used_free = 0
+    while left > 0:
+        best_v, best_i = -1.0, None
+        if used_free < n_free:
+            best_v, best_i = v_free, -1
+        if n_occ:
+            i = min(range(n_occ), key=lambda j: depth[j])
+            x = depth[i]
+            d = (m / ((x + m) * (x + 1.0 + m))) if m > 0 else 0.0
+            v = (1.0 / (1.0 + m)) * w if x == 0 and m > 0 else d * w
+            if v > best_v:
+                best_v, best_i = v, i
+        if best_i is None or best_v <= 0.0:
+            break
+        if best_i == -1:
+            used_free += 1
+        else:
+            depth[best_i] += 1
+        total += best_v
+        left -= 1
+    return total, (used_free, depth)
+
+
+def optimal_split_exact(difficulty, a, b, n_top, n_spare, omega,
+                        usable_top=None, usable_spare=None):
+    """A_omega maximising J, with the exact greedy inner solution."""
+    a = max(1, int(a)); b = max(1e-9, float(b))
+    n = float(a) + b
+    rho = omega / float(omega - 1) if omega > 1 else 1.0
+    b_top, d_b, m_top, b_sp, d_s, m_sp = _rival_shape(difficulty, b, n_top, n_spare)
+    ut = int(usable_top or n_top); us = int(usable_spare or n_spare)
+    q_top = min(1.0, d_b / float(max(1, n_top))) if b_top else 0.0
+    q_sp = min(1.0, d_s / float(max(1, n_spare))) if b_sp else 0.0
+    beta = b_top / b
+    best = (0, -1e18)
+    for a_top in range(0, a + 1):
+        n_om = b_top + a_top
+        sigma = 1.0 if n_om <= 0 else math.exp(-(n_om / n) * rho)
+        j = (1.0 + difficulty) * (a_top / float(a) - beta) * (1.0 - sigma)
+        j += _greedy_level(a_top, ut, q_top, m_top, a, b)[0]
+        j += _greedy_level(a - a_top, us, q_sp, m_sp, a, b)[0]
+        if j > best[1]:
+            best = (a_top, j)
+    return best
+
+
+def picker_exact(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                 n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Optimal for our_mean - their_mean, exact greedy, conditional on occupancy."""
+    assert pool and hotkeys
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes) if n_nodes else 0.8
+    a = len(hotkeys)
+    omega = max(len(c) for c in pool)
+    top = [c for c in pool if len(c) == omega]
+    spare = [c for c in pool if len(c) == omega - 1]
+    n_top = max(int(n_top_true) or len(top), 1)
+    n_sp = max(int(n_spare_true) or len(spare), 1)
+    fn = fleet_n or infer_fleet_n(a, difficulty)
+    b = sum(fleet_profile(fn).values()) * selection_p(difficulty)
+    a_top, _ = optimal_split_exact(difficulty, a, b, n_top, n_sp, omega,
+                                   usable_top=len(top) or 1,
+                                   usable_spare=len(spare) or 1)
+    a_top = min(a_top, a) if top else 0
+    slots = []
+    if a_top and top:
+        for i, mlt in enumerate(_spread(a_top, min(a_top, len(top)))):
+            slots.extend([list(top[i])] * mlt)
+    rest = a - len(slots)
+    if rest > 0 and spare:
+        for i, mlt in enumerate(_spread(rest, min(rest, len(spare)))):
+            slots.extend([list(spare[i])] * mlt)
+    while len(slots) < a:
+        pick = top or spare
+        slots.append(list(pick[len(slots) % len(pick)]))
+    return _rotate(uuid, slots[:a], hotkeys)
