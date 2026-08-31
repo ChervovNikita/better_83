@@ -43,6 +43,7 @@ import argparse
 import collections
 import heapq
 import math
+import os
 
 
 class Plan(object):
@@ -103,7 +104,17 @@ def marginal(a, n_distinct, m, A):
     return A + expected_share(a, n_distinct, m) - expected_share(a, n_distinct, m - 1)
 
 
-def crowding(hits, a_hat, kappa=0.69, beta=0.0, n_supply=0):
+# kappa is the share of the field's omega answers that land inside our pool. It
+# was measured at 0.69 against the OLD harvester. The parity-split + plateau +
+# closure fixes took pool coverage of the field's omega answers to 100%, so the
+# calibrated value is now 1.0 and the constant understates crowding by ~45%.
+# Env-overridable so the corrected baseline can be measured rather than assumed.
+KAPPA = float(os.environ.get("SN83_KAPPA", "0.69"))
+
+
+def crowding(hits, a_hat, kappa=None, beta=0.0, n_supply=0):
+    if kappa is None:
+        kappa = KAPPA
     """Expected field miners on each of our cliques, from their basin sizes.
 
     A4 assumes every clique of a size carries the same F, which lets plan()
@@ -258,7 +269,9 @@ def plan(q, omega, n_top, n_spare, n_others, a_hat, difficulty, b_hat=0,
 
 
 def slots_hits(pool, hits, q, n_others, a_hat, difficulty, b_hat=0, beta=0.0,
-               kappa=0.69, n_top_supply=0, n_spare_supply=0):
+               kappa=None, n_top_supply=0, n_spare_supply=0):
+    if kappa is None:
+        kappa = KAPPA
     """Allocation using per-clique crowding estimated from basin size.
 
     Same value function as plan(), but A4 is relaxed: each clique carries its
