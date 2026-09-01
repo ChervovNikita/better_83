@@ -278,7 +278,7 @@ def c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min):
 
 
 def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
-           f_top, f_sp, their_cliques, field_min=1.0):
+           f_top, f_sp, their_cliques, field_min=1.0, absolute=False):
     """J = our_mean - their_mean for one fully specified allocation.
 
     alloc_* : our multiplicity per clique we use.
@@ -320,13 +320,18 @@ def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
     cmin = c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min)
     our_mean = ((1.0 + difficulty) * (a_top + (a - a_top) * sigma)
                 + cmin * gain) / float(a)
+    if absolute:
+        # OUR mean alone. Optimising the difference was shown to win by
+        # suppression: it lowers our_median 0.064 to lower theirs 0.069. This
+        # asks the other question -- can we raise our own score at all?
+        return our_mean
     their_mean = ((1.0 + difficulty) * (f_top + f_sp * sigma)
                   + cmin * max(0.0, their_cliques - loss)) / float(b)
     return our_mean - their_mean
 
 
 def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
-             their_cliques, cap_top, cap_sp, field_min=1.0):
+             their_cliques, cap_top, cap_sp, field_min=1.0, absolute=False):
     """Best (alloc_top, alloc_sp) under eval_J.
 
     phi depends on how many of our hotkeys sit at omega, so a_top is the one
@@ -361,7 +366,7 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
                             best_i = i
                     target[best_i] += 1
         j = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
-                   f_top, f_sp, their_cliques, field_min)
+                   f_top, f_sp, their_cliques, field_min, absolute)
         if best_j is None or j > best_j:
             best_j = j
             best = (list(at), list(asp))
@@ -487,4 +492,39 @@ def picker_partial(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None
     at, asp = allocate(difficulty, omega, a, b, law(omega, n_top),
                        law(omega - 1, n_sp), f_top, f_sp, their_cliques,
                        max(1, len(top)), max(1, len(spare)), field_min)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+ABSOLUTE = os.environ.get("SN83_ABSOLUTE", "0") == "1"
+
+
+def picker_absolute(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                    n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Maximise OUR OWN mean reward instead of the difference.
+
+    The difference-optimal picker beats the baseline on edge while scoring worse
+    per hotkey (64 better / 1296 worse, p=1e-244) -- it wins by suppression, and
+    emissions follow absolute share. This asks whether the same machinery, aimed
+    at our own score, can beat the baseline on the quantity that pays.
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    their_cliques = sum(min(d, float(n_top if lvl == "top" else n_sp))
+                        for lvl, _q, d, _m in rows)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s, f_top, f_sp,
+                       their_cliques, max(1, len(top)), max(1, len(spare)),
+                       field_min, absolute=True)
     return _emit(uuid, hotkeys, top, spare, at, asp)
