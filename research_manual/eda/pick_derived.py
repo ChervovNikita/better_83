@@ -45,8 +45,17 @@ OPERATORS = {
 }
 # TOP4's level rule, fitted exactly on 739 rounds: omega iff supply >= S*(D).
 TOP4_S_STAR = {0.7: 12, 0.8: 8, 0.9: 5, 1.0: 3}
-# Entities 2 and 3 run the same fill-and-spill and differ only in solver reach.
-REACH = {"e2": 0.76, "e3": 0.97}
+# Entities 2 and 3 run the same fill-and-spill.  Measured on 209 rounds with
+# omega-supply >= 3: e2 fills exactly in 89.5% of them (mean take/min(q,S) 0.964),
+# e3 in 98.6% (0.996).  The old REACH["e2"] = 0.76 modelled a solver that reaches
+# three quarters of the omega cliques; e2 in fact reaches nearly all of them and
+# instead ABSTAINS from omega when supply is tiny -- at S <= 2 it places only 0.42
+# of min(q,S) there, and in 55% of those rounds nothing at all.  Modelling that
+# abstention as a flat reach over-stated the field at omega in the small-supply
+# stratum, which is exactly where it flipped our level split.
+REACH = {"e2": 0.96, "e3": 0.97}
+REACH_SMALL = {"e2": 0.42, "e3": 1.00}
+REACH_SMALL_S = 3
 
 FLEET_N = int(os.environ.get("SN83_FLEET_N", "0"))
 
@@ -171,7 +180,8 @@ def entity_plan(difficulty, n_top, n_spare, fleet_n):
                 d = max(1.0, min(q, float(n_spare)))
                 rows.append(("spare", q, d, q / d))
         elif name in REACH:
-            take = min(q, n_top * REACH[name])
+            reach = REACH[name] if n_top >= REACH_SMALL_S else REACH_SMALL[name]
+            take = min(q, n_top * reach)
             if take > 0.0:
                 d = max(1.0, min(take, float(n_top)))
                 rows.append(("top", take, d, take / d))
@@ -361,6 +371,46 @@ def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
     return our_mean - their_mean
 
 
+def _widths(hi):
+    """Candidate spread widths.  J is NOT monotone in k: spread() leaves a ragged
+    tail, and a clique carrying a single hotkey drops its answer count to 1, which
+    collapses c_min for the whole round.  So the widest spread can be beaten by a
+    narrower even one -- 15 hotkeys over 8 cliques scores 0.383 where 7 cliques
+    score 0.552.  The old code assumed k = kmax by a majorisation argument that
+    holds only at fixed c_min.  A full 1..kmax sweep is too slow when cap is in the
+    thousands, so take a geometric grid, every divisor of the load (those give an
+    even spread with no tail), and the top end exactly.
+    """
+    if hi <= 0:
+        return [0]
+    ks = {1, hi}
+    k = 1
+    while k < hi:
+        ks.add(k)
+        k = max(k + 1, int(k * 1.4))
+    ks.update(x for x in (hi - 1, hi - 2) if x >= 1)
+    return sorted(ks)
+
+
+def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
+                 f_top, f_sp, their_cliques, cap_top, cap_sp, field_min, absolute):
+    """Best (alloc_top, alloc_sp) over spread WIDTHS, for a fixed level split."""
+    kt = [k for k in _widths(min(a_top, cap_top)) if k] if a_top else [0]
+    ks = [k for k in _widths(min(a_sp, cap_sp)) if k] if a_sp else [0]
+    best_j = None
+    best = ([], [])
+    for i in kt:
+        at = spread(a_top, i) if a_top else []
+        for j in ks:
+            asp = spread(a_sp, j) if a_sp else []
+            v = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
+                       f_top, f_sp, their_cliques, field_min, absolute)
+            if best_j is None or v > best_j:
+                best_j = v
+                best = (list(at), list(asp))
+    return best
+
+
 def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
              their_cliques, cap_top, cap_sp, field_min=1.0, absolute=False):
     """Best (alloc_top, alloc_sp) under eval_J.
@@ -379,8 +429,9 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
     for a_top in range(0, a + 1):
         a_sp = a - a_top
         if isinstance(occ_top, dict):
-            at = spread(a_top, max(1, min(a_top, cap_top))) if a_top else []
-            asp = spread(a_sp, max(1, min(a_sp, cap_sp))) if a_sp else []
+            at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp,
+                                   occ_top, occ_sp, f_top, f_sp, their_cliques,
+                                   cap_top, cap_sp, field_min, absolute)
         else:
             at = [0] * len(occ_top)
             asp = [0] * len(occ_sp)
@@ -478,10 +529,15 @@ def picker_oracle(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
     f_sp = float(sum(v for k, v in field.items() if len(k) == omega - 1))
     b = max(1e-9, f_top + f_sp)
     their_cliques = float(sum(1 for v in field.values() if v > 0))
-    # every clique the field holds, including ones inside our pool that we may
-    # give no hotkeys to -- those are covered by neither the alloc loop nor an
-    # outside-the-pool minimum, and vanished from c_min entirely
-    held = [v for v in field.values() if v > 0]
+    # Only cliques OUTSIDE our pool.  The claim this replaced -- that in-pool
+    # cliques we give no hotkeys to are covered by neither the alloc loop nor the
+    # outside minimum -- is false: c_min_of's exact branch keeps every pool clique
+    # with m + f > 0, m = 0 included.  Passing their raw f here a SECOND time, as a
+    # floor, ignores the hotkeys we just piled onto them and can only drag c_min
+    # down.  On round 35229818 at N=160 the realised counts were [20..22] and this
+    # returned 1.0.  It moved allocate()'s argmax on 29/100 rounds at N=160.
+    ours = {tuple(sorted(c)) for c in top} | {tuple(sorted(c)) for c in spare}
+    held = [v for k, v in field.items() if v > 0 and k not in ours]
     field_min = float(min(held)) if held else 0.0
     at, asp = allocate(difficulty, omega, a, b,
                        [float(field[tuple(sorted(c))]) for c in top],
@@ -514,10 +570,15 @@ def picker_partial(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None
         out[0] = max(0.0, 1.0 - sum(out.values()))
         return out
 
-    # every clique the field holds, including ones inside our pool that we may
-    # give no hotkeys to -- those are covered by neither the alloc loop nor an
-    # outside-the-pool minimum, and vanished from c_min entirely
-    held = [v for v in field.values() if v > 0]
+    # Only cliques OUTSIDE our pool.  The claim this replaced -- that in-pool
+    # cliques we give no hotkeys to are covered by neither the alloc loop nor the
+    # outside minimum -- is false: c_min_of's exact branch keeps every pool clique
+    # with m + f > 0, m = 0 included.  Passing their raw f here a SECOND time, as a
+    # floor, ignores the hotkeys we just piled onto them and can only drag c_min
+    # down.  On round 35229818 at N=160 the realised counts were [20..22] and this
+    # returned 1.0.  It moved allocate()'s argmax on 29/100 rounds at N=160.
+    ours = {tuple(sorted(c)) for c in top} | {tuple(sorted(c)) for c in spare}
+    held = [v for k, v in field.items() if v > 0 and k not in ours]
     field_min = float(min(held)) if held else 0.0
     at, asp = allocate(difficulty, omega, a, b, law(omega, n_top),
                        law(omega - 1, n_sp), f_top, f_sp, their_cliques,
