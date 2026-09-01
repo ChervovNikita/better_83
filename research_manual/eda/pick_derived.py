@@ -54,8 +54,15 @@ TOP4_S_STAR = {0.7: 12, 0.8: 8, 0.9: 5, 1.0: 3}
 # abstention as a flat reach over-stated the field at omega in the small-supply
 # stratum, which is exactly where it flipped our level split.
 REACH = {"e2": 0.96, "e3": 0.97}
-REACH_SMALL = {"e2": 0.42, "e3": 1.00}
-REACH_SMALL_S = 3
+# e2's reach is a CURVE in supply, not a constant, and not a two-step threshold.
+# Measured take/min(q,S) by supply: S=1 0.364 (n=22), S=2 0.618 (17), S=3 0.762 (7),
+# S=4 0.821 (14) -- rising and saturating.  One parameter fits all four within their
+# CIs: 1 - (1-p)^S with p = 0.36, giving 0.360 / 0.590 / 0.738 / 0.832.  At S=1 the
+# behaviour is a clean Bernoulli (0% partial fills, n=22): e2 either takes the single
+# omega clique or abstains entirely.  Modelling that as a flat reach put a fractional
+# 0.42 answer on it in every round, which is the mean of two regimes that never occur.
+REACH_MISS = {"e2": 0.64}
+REACH_CAP = 0.96
 
 FLEET_N = int(os.environ.get("SN83_FLEET_N", "0"))
 
@@ -159,6 +166,19 @@ def fleet_profile(fleet_n):
 # what the field will do this round
 # --------------------------------------------------------------------------
 
+def operator_reach(name, supply):
+    """Fraction of the omega cliques an operator places answers on.
+
+    Constant for e3 (measured 0.996 at supply >= 3).  For e2 it rises with supply
+    and saturates -- see REACH_MISS.  The curve matters only at small supply, which
+    is exactly the stratum where the level split is decided by a couple of answers.
+    """
+    miss = REACH_MISS.get(name)
+    if miss is None:
+        return REACH[name]
+    return min(REACH_CAP, 1.0 - miss ** max(1, int(supply)))
+
+
 def entity_plan(difficulty, n_top, n_spare, fleet_n):
     """One (level, answers, distinct_cliques, multiplicity) row per operator.
 
@@ -180,8 +200,7 @@ def entity_plan(difficulty, n_top, n_spare, fleet_n):
                 d = max(1.0, min(q, float(n_spare)))
                 rows.append(("spare", q, d, q / d))
         elif name in REACH:
-            reach = REACH[name] if n_top >= REACH_SMALL_S else REACH_SMALL[name]
-            take = min(q, n_top * reach)
+            take = min(q, n_top * operator_reach(name, n_top))
             if take > 0.0:
                 d = max(1.0, min(take, float(n_top)))
                 rows.append(("top", take, d, take / d))
@@ -319,7 +338,8 @@ def expected_cliques(law_top, n_top, law_sp, n_sp):
 
 
 def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
-           f_top, f_sp, their_cliques, field_min=1.0, absolute=False):
+           f_top, f_sp, their_cliques, field_min=1.0, absolute=False,
+           tail=False):
     """J = our_mean - their_mean for one fully specified allocation.
 
     alloc_* : our multiplicity per clique we use.
@@ -339,6 +359,14 @@ def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
 
     gain = 0.0
     loss = 0.0
+    cnt_hi = 1.0
+    for alloc, occ in ((alloc_top, occ_top), (alloc_sp, occ_sp)):
+        if isinstance(occ, dict):
+            hi = max(occ) if occ else 0.0
+            cnt_hi = max(cnt_hi, float(hi) + (max(alloc) if alloc else 0.0))
+        else:
+            for m, f in zip(alloc, occ):
+                cnt_hi = max(cnt_hi, float(m) + float(f))
     for alloc, occ in ((alloc_top, occ_top), (alloc_sp, occ_sp)):
         if isinstance(occ, dict):
             for m in alloc:
@@ -361,6 +389,25 @@ def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
     cmin = c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min)
     our_mean = ((1.0 + difficulty) * (a_top + (a - a_top) * sigma)
                 + cmin * gain) / float(a)
+    if tail:
+        # Deregistration takes the WORST miners, so the quantity to beat is the
+        # field's lower tail, not its mean.  Measured: our hotkey means are tightly
+        # clustered (spread 0.30) while the field's span 1.6, and the field's 10th
+        # percentile lands almost exactly on our median -- so the metric is the
+        # MARGIN between our score and that percentile, and it is decided as much by
+        # where the cut sits as by where we sit.  Maximising our own mean instead
+        # (picker_absolute) raises our median 0.027 but lifts the cut 0.037, which
+        # is why it scores WORSE on the tail: 19.0% vs 17.5%.
+        #
+        # A field miner in that tail is at omega-1 -- if the field is there at all --
+        # on the most crowded clique it holds, so its reward is
+        #     (1+D)*sigma + c_min/cnt_hi
+        # Both terms are ours to push down: sigma falls as we put more hotkeys at
+        # omega (it is exp(-phi*rho) and phi counts OUR omega answers), and cnt_hi
+        # rises as we pile onto the cliques the field already crowds.
+        weak_sigma = sigma if f_sp > 0.0 else 1.0
+        their_weak = (1.0 + difficulty) * weak_sigma + cmin / max(1.0, cnt_hi)
+        return our_mean - their_weak
     if absolute:
         # OUR mean alone. Optimising the difference was shown to win by
         # suppression: it lowers our_median 0.064 to lower theirs 0.069. This
@@ -393,7 +440,8 @@ def _widths(hi):
 
 
 def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
-                 f_top, f_sp, their_cliques, cap_top, cap_sp, field_min, absolute):
+                 f_top, f_sp, their_cliques, cap_top, cap_sp, field_min, absolute,
+                 tail=False):
     """Best (alloc_top, alloc_sp) over spread WIDTHS, for a fixed level split."""
     kt = [k for k in _widths(min(a_top, cap_top)) if k] if a_top else [0]
     ks = [k for k in _widths(min(a_sp, cap_sp)) if k] if a_sp else [0]
@@ -404,7 +452,7 @@ def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
         for j in ks:
             asp = spread(a_sp, j) if a_sp else []
             v = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
-                       f_top, f_sp, their_cliques, field_min, absolute)
+                       f_top, f_sp, their_cliques, field_min, absolute, tail)
             if best_j is None or v > best_j:
                 best_j = v
                 best = (list(at), list(asp))
@@ -412,7 +460,8 @@ def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
 
 
 def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
-             their_cliques, cap_top, cap_sp, field_min=1.0, absolute=False):
+             their_cliques, cap_top, cap_sp, field_min=1.0, absolute=False,
+             tail=False):
     """Best (alloc_top, alloc_sp) under eval_J.
 
     phi depends on how many of our hotkeys sit at omega, so a_top is the one
@@ -431,7 +480,7 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
         if isinstance(occ_top, dict):
             at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp,
                                    occ_top, occ_sp, f_top, f_sp, their_cliques,
-                                   cap_top, cap_sp, field_min, absolute)
+                                   cap_top, cap_sp, field_min, absolute, tail)
         else:
             at = [0] * len(occ_top)
             asp = [0] * len(occ_sp)
@@ -448,7 +497,7 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
                             best_i = i
                     target[best_i] += 1
         j = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
-                   f_top, f_sp, their_cliques, field_min, absolute)
+                   f_top, f_sp, their_cliques, field_min, absolute, tail)
         if best_j is None or j > best_j:
             best_j = j
             best = (list(at), list(asp))
@@ -503,6 +552,76 @@ def picker(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
     at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
                        f_top, f_sp, their_cliques,
                        max(1, len(top)), max(1, len(spare)), field_min)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+ATOP_BIAS = int(os.environ.get("SN83_ATOP_BIAS", "0"))
+
+
+def picker_bias(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                n_top_true=0, n_spare_true=0, fleet_n=0):
+    """picker(), then shift the level split by SN83_ATOP_BIAS hotkeys.
+
+    A probe, not a strategy: the tail metric is the margin between our score and
+    the field's 10th percentile, and both move with phi (our share of omega
+    answers).  Measured at N=110, raising phi by 0.167 moved the cut -0.105 but our
+    own median -0.187, so the margin's derivative in phi is negative and the
+    optimum is at LOWER phi than the difference objective picks.  This sweeps it.
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
+                       f_top, f_sp, their_cliques,
+                       max(1, len(top)), max(1, len(spare)), field_min)
+    a_top = max(0, min(a, int(sum(at)) + ATOP_BIAS))
+    a_sp = a - a_top
+    at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp, law_t, law_s,
+                           f_top, f_sp, their_cliques,
+                           max(1, len(top)), max(1, len(spare)), field_min, False)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+def picker_tail(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                n_top_true=0, n_spare_true=0, fleet_n=0):
+    """BLIND, but aimed at the field's LOWER TAIL instead of its mean.
+
+    Same field model and same allocator as picker(); only the value function
+    differs.  See eval_J's tail branch for why the tail is a different objective
+    from both the difference and our own absolute score.
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
+                       f_top, f_sp, their_cliques,
+                       max(1, len(top)), max(1, len(spare)), field_min, tail=True)
     return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
