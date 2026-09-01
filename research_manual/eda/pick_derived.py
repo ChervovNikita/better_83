@@ -193,15 +193,30 @@ def law_from_plan(rows, level, supply):
     measured at N=30 it claimed 54.8% of omega-cliques were free against 35.7%.
     """
     law = {0: 1.0}
-    for lvl, _q, d, m in rows:
+    for lvl, q, d, m in rows:
         if lvl != level:
             continue
-        p_hit = min(1.0, d / float(max(1, supply)))
-        step = max(1, int(round(m)))
+        # An operator plays spread(q, d): e cliques carry ceil(m) and d-e carry
+        # floor(m). Rounding m to a single step over-states the load whenever the
+        # fraction is above a half -- at N=30 TOP4 sits at m=2.56, rounded to 3,
+        # a 17% over-statement that made the field look more crowded than it is
+        # and cost 0.010-0.018 of edge below N=90.
+        d_i = max(1.0, d)
+        lo = int(math.floor(m))
+        e = q - lo * d_i                      # cliques carrying lo+1
+        e = min(max(e, 0.0), d_i)
+        s = float(max(1, supply))
+        p_hi = min(1.0, e / s)
+        p_lo = min(1.0 - p_hi, max(0.0, (d_i - e) / s))
         nxt = collections.defaultdict(float)
         for f, pr in law.items():
-            nxt[f] += pr * (1.0 - p_hit)
-            nxt[f + step] += pr * p_hit
+            nxt[f] += pr * (1.0 - p_hi - p_lo)
+            if p_lo > 0.0 and lo > 0:
+                nxt[f + lo] += pr * p_lo
+            elif p_lo > 0.0:
+                nxt[f] += pr * p_lo
+            if p_hi > 0.0:
+                nxt[f + lo + 1] += pr * p_hi
         law = dict(nxt)
     return law
 
@@ -275,6 +290,22 @@ def c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min):
             p_all *= sum(p for f, p in law.items() if m + f >= k or m + f == 0)
         expected += p_all
     return max(1.0, expected)
+
+
+def expected_cliques(law_top, n_top, law_sp, n_sp):
+    """Expected number of DISTINCT cliques the field occupies.
+
+    C is a UNION cardinality, not a sum.  Summing each operator's distinct-clique
+    count over rows -- which this did -- counts a clique once per operator that
+    lands on it, and the operators overlap heavily because they are all solving
+    the same graph and finding the same cliques.  The over-count ran 1.25x
+    overall and 1.73x on exactly the rounds where it flipped our level split,
+    which was the whole of the blind picker's remaining gap to the partial oracle.
+
+    A clique is occupied iff at least one operator lands on it, which the law
+    already gives as 1 - P(f=0), so no new estimate is introduced here.
+    """
+    return n_top * (1.0 - law_top.get(0, 0.0)) + n_sp * (1.0 - law_sp.get(0, 0.0))
 
 
 def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
@@ -410,10 +441,9 @@ def picker(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
     f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
     f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
     b = max(1e-9, f_top + f_sp)
-    their_cliques = sum(min(d, float(n_top if lvl == "top" else n_sp))
-                        for lvl, _q, d, _m in rows)
     law_t = law_from_plan(rows, "top", n_top)
     law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
     # blind bound on c_min: the lightest load the field is expected to leave on
     # at least one clique it holds, outside whatever we take
     occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
@@ -517,10 +547,9 @@ def picker_absolute(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=Non
     f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
     f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
     b = max(1e-9, f_top + f_sp)
-    their_cliques = sum(min(d, float(n_top if lvl == "top" else n_sp))
-                        for lvl, _q, d, _m in rows)
     law_t = law_from_plan(rows, "top", n_top)
     law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
     occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
                 for f, p in law.items() if f > 0]
     field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
