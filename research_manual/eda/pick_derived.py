@@ -27,6 +27,7 @@ import hashlib
 import json
 import math
 import os
+import random
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 METAGRAPH = os.environ.get("SN83_METAGRAPH",
@@ -339,7 +340,7 @@ def expected_cliques(law_top, n_top, law_sp, n_sp):
 
 def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
            f_top, f_sp, their_cliques, field_min=1.0, absolute=False,
-           tail=False):
+           tail=False, lam=None, floor_mode=False):
     """J = our_mean - their_mean for one fully specified allocation.
 
     alloc_* : our multiplicity per clique we use.
@@ -389,6 +390,19 @@ def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
     cmin = c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min)
     our_mean = ((1.0 + difficulty) * (a_top + (a - a_top) * sigma)
                 + cmin * gain) / float(a)
+    if floor_mode:
+        # The metric counts hotkeys under a line, so the worst answer we send matters
+        # more than the average one.  Score the allocation by its weakest slot.
+        worst = None
+        for alloc, occ, is_top in ((alloc_top, occ_top, True), (alloc_sp, occ_sp, False)):
+            for m in alloc:
+                m = int(m)
+                if m <= 0:
+                    continue
+                v = answer_value(difficulty, sigma, cmin, is_top, m, occ)
+                if worst is None or v < worst:
+                    worst = v
+        return worst if worst is not None else -1e9
     if tail:
         # Deregistration takes the WORST miners, so the quantity to beat is the
         # field's lower tail, not its mean.  Measured: our hotkey means are tightly
@@ -415,6 +429,12 @@ def eval_J(difficulty, omega, a, b, alloc_top, alloc_sp, occ_top, occ_sp,
         return our_mean
     their_mean = ((1.0 + difficulty) * (f_top + f_sp * sigma)
                   + cmin * max(0.0, their_cliques - loss)) / float(b)
+    if lam is not None:
+        # J_lambda = our_mean - lambda*their_mean.  lambda=1 is the edge objective;
+        # lambda=0 is our own score alone.  The bottom-10% metric scores us against a
+        # FIELD-ONLY threshold, so suppression is worth only what it moves that
+        # threshold -- which is an empirical question, not a modelling one.
+        return our_mean - lam * their_mean
     return our_mean - their_mean
 
 
@@ -441,7 +461,7 @@ def _widths(hi):
 
 def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
                  f_top, f_sp, their_cliques, cap_top, cap_sp, field_min, absolute,
-                 tail=False):
+                 tail=False, lam=None, floor_mode=False):
     """Best (alloc_top, alloc_sp) over spread WIDTHS, for a fixed level split."""
     # A level with no cliques cannot hold hotkeys.  Callers used to pass
     # max(1, len(...)) as the cap, which reports room on an EMPTY level and let
@@ -461,7 +481,7 @@ def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
         for j in ks:
             asp = spread(a_sp, j) if a_sp else []
             v = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
-                       f_top, f_sp, their_cliques, field_min, absolute, tail)
+                       f_top, f_sp, their_cliques, field_min, absolute, tail, lam, floor_mode)
             if best_j is None or v > best_j:
                 best_j = v
                 best = (list(at), list(asp))
@@ -470,7 +490,7 @@ def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
 
 def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
              their_cliques, cap_top, cap_sp, field_min=1.0, absolute=False,
-             tail=False):
+             tail=False, lam=None, floor_mode=False):
     """Best (alloc_top, alloc_sp) under eval_J.
 
     phi depends on how many of our hotkeys sit at omega, so a_top is the one
@@ -489,7 +509,7 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
         if isinstance(occ_top, dict):
             at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp,
                                    occ_top, occ_sp, f_top, f_sp, their_cliques,
-                                   cap_top, cap_sp, field_min, absolute, tail)
+                                   cap_top, cap_sp, field_min, absolute, tail, lam, floor_mode)
         else:
             at = [0] * len(occ_top)
             asp = [0] * len(occ_sp)
@@ -506,11 +526,126 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
                             best_i = i
                     target[best_i] += 1
         j = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
-                   f_top, f_sp, their_cliques, field_min, absolute, tail)
+                   f_top, f_sp, their_cliques, field_min, absolute, tail, lam, floor_mode)
         if best_j is None or j > best_j:
             best_j = j
             best = (list(at), list(asp))
     return best
+
+
+FAIR = os.environ.get("SN83_FAIR", "0")
+# Realized-score feedback.  A deployed miner reads its own past rewards off the
+# chain; the validator scores the ANSWER, not the sender, so a table of
+# {round: {clique: score}} harvested from an earlier pass reproduces exactly what
+# it would know, with no foresight beyond the previous round.  SN83_SCORE_TABLE
+# points at that table; SN83_CUT is the field's 10th percentile, also chain-visible,
+# and decides the DIRECTION:
+#   our median above the cut -> equalise, and the fleet lands on the good side
+#   our median below it      -> concentrate, so at least some clear the bar
+# Equalising below the cut is the trap: it moves everyone to the wrong side at once
+# (ceiling at N=70: 52.9% -> 75.7%).
+FAIR = os.environ.get("SN83_FAIR", "0")
+SCORE_TABLE = os.environ.get("SN83_SCORE_TABLE", "")
+FAIR_CUT = float(os.environ.get("SN83_CUT", "0"))
+_hk_state = {}
+_score_table = None
+
+
+def _scores_for(uuid):
+    global _score_table
+    if _score_table is None:
+        _score_table = {}
+        if SCORE_TABLE:
+            with open(SCORE_TABLE) as handle:
+                raw = json.load(handle)
+            for rid, pairs in raw.items():
+                _score_table[rid] = {tuple(k.split(",")): v for k, v in pairs.items()}
+    return _score_table.get(str(uuid), {})
+
+
+def answer_value(difficulty, sigma, cmin, is_top, m, occ):
+    """Predicted reward for ONE of our answers -- the validator's R_i, in exactly
+    the terms eval_J sums over: (1+D)*opt + c_min/cnt, with opt = 1 at omega and
+    sigma below it, and cnt = our multiplicity plus the field's load.
+    """
+    opt = 1.0 if is_top else sigma
+    if isinstance(occ, dict):
+        div = sum(p / float(m + f) for f, p in occ.items())
+    else:
+        div = 1.0 / float(m + occ)
+    return (1.0 + difficulty) * opt + cmin * div
+
+
+def _emit_feedback(uuid, hotkeys, slots, values, mode):
+    """Hand out slots by each hotkey's RUNNING MEAN so far, not by a fixed rank.
+
+    The static queue tried earlier could not work: it ranked hotkeys by a hash, so
+    it never responded to how anyone was actually doing.  82% of the variance in our
+    hotkey means is which ROUNDS a hotkey happened to be queried in -- luck a fixed
+    rank cannot see, but a running mean can, because a hotkey that drew poor rounds
+    simply shows a low mean and gets compensated in the next one.
+
+    mode "1" equalises: the best slot goes to the hotkey with the lowest running
+    mean.  That is the right direction when our median is ABOVE the cut and the
+    fleet only loses because it straddles it -- which is the case at N=50-90, where
+    our median clears the field's 10th percentile by +0.009 and 38.6% of hotkeys
+    still fall below.  Compressing the spread moves them all to the same side.
+
+    mode "2" does the opposite as a control: the best slot goes to the hotkey that
+    is already highest, concentrating the damage on a designated few.
+    """
+    order = sorted(range(len(slots)), key=lambda i: -values[i])
+    def running(h):
+        st = _hk_state.get(h)
+        return st[0] / st[1] if st and st[1] else 0.0
+    concentrate = mode == "2"
+    if mode == "3":
+        # Direction chosen from where our fleet sits relative to the cut.
+        seen = [running(h) for h in hotkeys if _hk_state.get(h, [0, 0])[1]]
+        if seen and FAIR_CUT > 0:
+            med = sorted(seen)[len(seen) // 2]
+            concentrate = med < FAIR_CUT
+    rank = sorted(range(len(hotkeys)), key=lambda j: running(hotkeys[j]),
+                  reverse=concentrate)
+    out = [None] * len(hotkeys)
+    realized = _scores_for(uuid) if mode == "3" else {}
+    for pos, j in enumerate(rank):
+        i = order[pos % len(order)]
+        out[j] = list(slots[i])
+        st = _hk_state.setdefault(hotkeys[j], [0.0, 0])
+        key = tuple(str(v) for v in sorted(slots[i]))
+        st[0] += realized.get(key, values[i])
+        st[1] += 1
+    return out
+
+
+def _slots_and_values(difficulty, omega, a, top, spare, alloc_top, alloc_sp,
+                      occ_top, occ_sp, f_top, f_sp, field_min):
+    """The round's answers, each with its predicted reward."""
+    a_top = float(sum(alloc_top))
+    n = a + f_top + f_sp
+    rho = omega / float(omega - 1)
+    n_omega = f_top + a_top
+    sigma = 1.0 if n_omega <= 0.0 or n <= 0 else math.exp(-(n_omega / n) * rho)
+    cmin = c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min)
+    slots = []
+    values = []
+    for alloc, cliques, occ, is_top in ((alloc_top, top, occ_top, True),
+                                        (alloc_sp, spare, occ_sp, False)):
+        for i, m in enumerate(alloc):
+            m = int(m)
+            if m <= 0 or i >= len(cliques):
+                continue
+            o = occ if isinstance(occ, dict) else occ[i]
+            v = answer_value(difficulty, sigma, cmin, is_top, m, o)
+            for _ in range(m):
+                slots.append(list(cliques[i]))
+                values.append(v)
+    pool = top + spare
+    while len(slots) < a:
+        slots.append(list(pool[len(slots) % len(pool)]))
+        values.append(0.0)
+    return slots, values
 
 
 PRIORITY = os.environ.get("SN83_PRIORITY", "0") == "1"
@@ -688,6 +823,166 @@ def picker_nostack(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None
     a_top = min(int(sum(at)), len(top))
     a_sp = a - a_top
     if len(spare) > 0:
+        at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp, law_t, law_s,
+                               f_top, f_sp, their_cliques,
+                               len(top), len(spare), field_min, False)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+def picker_fair(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                n_top_true=0, n_spare_true=0, fleet_n=0):
+    """picker(), but the ANSWERS are handed out by each hotkey's running mean.
+
+    Identical allocation, so the round's score multiset and the edge are untouched;
+    only which hotkey sends which answer changes.  SN83_FAIR=1 equalises, =2
+    concentrates.  State is per-process and accumulates across rounds, which a
+    deployed miner can do too -- it knows what it sent and can price it.
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
+                       f_top, f_sp, their_cliques,
+                       len(top), len(spare), field_min)
+    slots, values = _slots_and_values(difficulty, omega, a, top, spare, at, asp,
+                                      law_t, law_s, f_top, f_sp, field_min)
+    return _emit_feedback(uuid, list(hotkeys), slots, values, FAIR)
+
+
+LAM = os.environ.get("SN83_LAMBDA", "")
+FLOOR = os.environ.get("SN83_FLOOR", "0") == "1"
+
+
+def picker_lambda(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                  n_top_true=0, n_spare_true=0, fleet_n=0):
+    """picker() with the value function reweighted: J = our_mean - lambda*their_mean.
+
+    SN83_LAMBDA=1 reproduces picker() exactly; 0 optimises our own score alone.
+    SN83_FLOOR=1 switches to maximin over our own answers instead.
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
+                       f_top, f_sp, their_cliques,
+                       len(top), len(spare), field_min,
+                       lam=(float(LAM) if LAM else None), floor_mode=FLOOR)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+POOL_PICK = os.environ.get("SN83_POOL_PICK", "")
+
+
+def picker_select(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                  n_top_true=0, n_spare_true=0, fleet_n=0):
+    """picker(), but CHOOSING which cliques to occupy out of a deeper pool.
+
+    allocate() spreads one hotkey per clique over the front of the pool, so the pool's
+    ORDER decides which cliques we take.  The default order is basin descending -- the
+    most findable cliques first -- and a rival solver lands on exactly those.  Measured
+    at N=70: our alone-rate at omega is 0.480 against TOP4's 0.633 and the field top
+    decile's 0.748, while omega-RATE is identical (0.82) across all of them.  The gap is
+    worst where supply is AMPLE (30-99 cliques: 0.263 vs 0.565), so it is choice, not
+    scarcity.  SN83_POOL_PICK reorders: hits_asc takes the least findable, random takes
+    an arbitrary subset, hits_desc is the current behaviour.
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    if POOL_PICK and hits:
+        idx = {tuple(sorted(c)): i for i, c in enumerate(pool)}
+        def h_of(c):
+            i = idx.get(tuple(sorted(c)))
+            return hits[i] if i is not None and i < len(hits) else 0
+        if POOL_PICK == "hits_asc":
+            top = sorted(top, key=h_of)
+            spare = sorted(spare, key=h_of)
+        elif POOL_PICK == "random":
+            seed = int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16)
+            rng = random.Random(seed)
+            top = list(top); spare = list(spare)
+            rng.shuffle(top); rng.shuffle(spare)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
+                       f_top, f_sp, their_cliques,
+                       len(top), len(spare), field_min)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+FREE_CAP = float(os.environ.get("SN83_FREE_CAP", "0"))
+
+
+def picker_free(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Take only as many omega cliques as we expect to hold ALONE; spill the rest.
+
+    The law already gives P(f=0) at omega, so n_top*P(f=0) is the expected number of
+    free omega cliques.  Beyond that we are landing on the field, and a crowded omega
+    answer (measured 2.317) is worth less than an uncrowded omega-1 one (2.675), of
+    which there are ~1230 with almost nobody on them.  SN83_FREE_CAP scales the cap;
+    0 disables it and reproduces picker().
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
+                       f_top, f_sp, their_cliques,
+                       len(top), len(spare), field_min)
+    if FREE_CAP > 0 and len(spare) > 0:
+        free = int(round(FREE_CAP * min(len(top), n_top) * law_t.get(0, 0.0)))
+        a_top = min(int(sum(at)), max(0, free))
+        a_sp = a - a_top
         at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp, law_t, law_s,
                                f_top, f_sp, their_cliques,
                                len(top), len(spare), field_min, False)
