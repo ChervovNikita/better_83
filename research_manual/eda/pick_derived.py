@@ -443,6 +443,15 @@ def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
                  f_top, f_sp, their_cliques, cap_top, cap_sp, field_min, absolute,
                  tail=False):
     """Best (alloc_top, alloc_sp) over spread WIDTHS, for a fixed level split."""
+    # A level with no cliques cannot hold hotkeys.  Callers used to pass
+    # max(1, len(...)) as the cap, which reports room on an EMPTY level and let
+    # _emit index spare[0] on a pool holding no omega-1 cliques.  picker() never
+    # reached it because allocate always sent everything to omega there; forcing
+    # the split (picker_bias) does.  Caps are now the true lengths, clamped here.
+    if cap_sp <= 0 and a_sp > 0:
+        a_top, a_sp = a_top + a_sp, 0
+    if cap_top <= 0 and a_top > 0:
+        a_sp, a_top = a_sp + a_top, 0
     kt = [k for k in _widths(min(a_top, cap_top)) if k] if a_top else [0]
     ks = [k for k in _widths(min(a_sp, cap_sp)) if k] if a_sp else [0]
     best_j = None
@@ -504,18 +513,56 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
     return best
 
 
+PRIORITY = os.environ.get("SN83_PRIORITY", "0") == "1"
+
+
+def _hotkey_rank(hotkey):
+    """A hotkey's fixed place in the queue, stable across rounds and rounds-sets."""
+    return int(hashlib.sha1(str(hotkey).encode()).hexdigest()[:8], 16)
+
+
 def _emit(uuid, hotkeys, top, spare, alloc_top, alloc_sp):
-    """Turn multiplicities into one answer per hotkey, rotated by round."""
+    """Turn multiplicities into one answer per hotkey.
+
+    The ANSWERS are fixed by allocate(); this only decides which hotkey sends
+    which one, so the round's score multiset -- and the edge -- are untouched.
+    What it does change is how those scores pile up per hotkey across rounds.
+
+    Two schemes:
+
+    rotation (default): offset by a hash of the round id, so over many rounds every
+    hotkey draws the same mix.  That is the FAIR choice and the wrong one for a
+    deregistration threshold.  It gives every hotkey the same expected score, so the
+    whole fleet lands in a 0.06-wide band on top of the field's 10th percentile
+    (margin at N=70 is +0.008) and pure noise decides who falls below -- 38.6% of
+    them do.
+
+    priority: rank hotkeys by a hash of the HOTKEY, then hand out slots best-first
+    down that fixed queue.  The same hotkeys always take the crowded cliques, so
+    they sit clearly below the cut while everyone above them sits clearly above it.
+    Concentrating the damage on a designated few is what a threshold metric wants:
+    with the mean pinned ON the cut, spreading the loss evenly maximises the number
+    of marginal hotkeys, which is exactly the failure being fixed.
+    """
     slots = []
     for i, m in enumerate(alloc_top):
-        slots.extend([list(top[i])] * int(m))
+        slots.extend([(0, int(m), list(top[i]))] * int(m))
     for i, m in enumerate(alloc_sp):
-        slots.extend([list(spare[i])] * int(m))
+        slots.extend([(1, int(m), list(spare[i]))] * int(m))
     pool = top + spare
     while len(slots) < len(hotkeys):
-        slots.append(list(pool[len(slots) % len(pool)]))
-    offset = int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16)
-    return [list(slots[(i + offset) % len(slots)]) for i in range(len(hotkeys))]
+        slots.append((2, 99, list(pool[len(slots) % len(pool)])))
+    if not PRIORITY:
+        offset = int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16)
+        return [list(slots[(i + offset) % len(slots)][2]) for i in range(len(hotkeys))]
+    # best slot first: omega before omega-1, and within a level the cliques we put
+    # fewest of our own hotkeys on (those are the ones that stay uncrowded).
+    order = sorted(range(len(slots)), key=lambda i: (slots[i][0], slots[i][1], i))
+    queue = sorted(range(len(hotkeys)), key=lambda h: _hotkey_rank(hotkeys[h]))
+    out = [None] * len(hotkeys)
+    for pos, h in enumerate(queue):
+        out[h] = list(slots[order[pos % len(order)]][2])
+    return out
 
 
 def _levels(pool):
@@ -551,11 +598,15 @@ def picker(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
     field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
     at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
                        f_top, f_sp, their_cliques,
-                       max(1, len(top)), max(1, len(spare)), field_min)
+                       len(top), len(spare), field_min)
     return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
 ATOP_BIAS = int(os.environ.get("SN83_ATOP_BIAS", "0"))
+# Fractional version.  The absolute knob is far too coarse: the validator queries
+# only ~19-30 of our hotkeys in a round, so a shift of 3 is a 16% swing in the
+# level split, which is why the first sweep saw only a cliff at 0 and no shape.
+ATOP_EPS = float(os.environ.get("SN83_ATOP_EPS", "0"))
 
 
 def picker_bias(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
@@ -586,12 +637,60 @@ def picker_bias(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
     field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
     at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
                        f_top, f_sp, their_cliques,
-                       max(1, len(top)), max(1, len(spare)), field_min)
-    a_top = max(0, min(a, int(sum(at)) + ATOP_BIAS))
+                       len(top), len(spare), field_min)
+    a_top = int(round(sum(at) * (1.0 + ATOP_EPS))) + ATOP_BIAS
+    a_top = max(0, min(a, a_top))
     a_sp = a - a_top
     at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp, law_t, law_s,
                            f_top, f_sp, their_cliques,
-                           max(1, len(top)), max(1, len(spare)), field_min, False)
+                           len(top), len(spare), field_min, False)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+NOSTACK = os.environ.get("SN83_NOSTACK", "0") == "1"
+
+
+def picker_nostack(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                   n_top_true=0, n_spare_true=0, fleet_n=0):
+    """picker(), but never put a SECOND hotkey on an omega clique.
+
+    Measured at N=70: within every crowding cell our per-answer score matches the
+    field's (alone 2.7584 vs 2.7649; cnt=2 2.3111 vs 2.3776), and the whole 0.061
+    deficit in our mean is the MIX -- we are alone 58.1% of the time against their
+    68.7%.  Giving us their mix would recover 0.045 of it.
+
+    8.3% of our answers are self-collisions, which arise only when a_top exceeds the
+    omega cliques we hold and spread() has to double up.  A stacked omega answer is
+    worth 2.31; a fresh omega-1 answer is worth 2.67.  So the excess should spill to
+    omega-1 rather than pile up.  This is CONDITIONAL on the overflow, which is why
+    it is not the same as shifting the level split globally -- that was swept over
+    217 rounds at +-8% and +-15% and is sharply worse in both directions.
+    """
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    n_top = max(int(n_top_true), len(top), 1)
+    n_sp = max(int(n_spare_true), len(spare), 1)
+    rows = entity_plan(difficulty, n_top, n_sp, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    law_t = law_from_plan(rows, "top", n_top)
+    law_s = law_from_plan(rows, "spare", n_sp)
+    their_cliques = expected_cliques(law_t, n_top, law_s, n_sp)
+    occupied = [(f, p * n) for law, n in ((law_t, n_top), (law_s, n_sp))
+                for f, p in law.items() if f > 0]
+    field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
+    at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
+                       f_top, f_sp, their_cliques,
+                       len(top), len(spare), field_min)
+    a_top = min(int(sum(at)), len(top))
+    a_sp = a - a_top
+    if len(spare) > 0:
+        at, asp = _best_widths(difficulty, omega, a, b, a_top, a_sp, law_t, law_s,
+                               f_top, f_sp, their_cliques,
+                               len(top), len(spare), field_min, False)
     return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
@@ -621,7 +720,7 @@ def picker_tail(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
     field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
     at, asp = allocate(difficulty, omega, a, b, law_t, law_s,
                        f_top, f_sp, their_cliques,
-                       max(1, len(top)), max(1, len(spare)), field_min, tail=True)
+                       len(top), len(spare), field_min, tail=True)
     return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
@@ -662,7 +761,7 @@ def picker_oracle(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
                        [float(field[tuple(sorted(c))]) for c in top],
                        [float(field[tuple(sorted(c))]) for c in spare],
                        f_top, f_sp, their_cliques,
-                       max(1, len(top)), max(1, len(spare)), field_min)
+                       len(top), len(spare), field_min)
     return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
@@ -701,7 +800,7 @@ def picker_partial(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None
     field_min = float(min(held)) if held else 0.0
     at, asp = allocate(difficulty, omega, a, b, law(omega, n_top),
                        law(omega - 1, n_sp), f_top, f_sp, their_cliques,
-                       max(1, len(top)), max(1, len(spare)), field_min)
+                       len(top), len(spare), field_min)
     return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
@@ -734,6 +833,6 @@ def picker_absolute(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=Non
                 for f, p in law.items() if f > 0]
     field_min = float(min((f for f, cnt in occupied if cnt >= 1.0), default=0.0))
     at, asp = allocate(difficulty, omega, a, b, law_t, law_s, f_top, f_sp,
-                       their_cliques, max(1, len(top)), max(1, len(spare)),
+                       their_cliques, len(top), len(spare),
                        field_min, absolute=True)
     return _emit(uuid, hotkeys, top, spare, at, asp)
