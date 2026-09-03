@@ -160,6 +160,42 @@ def bayes(rnd, q, score):
     return native.bayes(rnd, q, _posterior(rnd))
 
 
+def _production_module():
+    import importlib
+    import os
+    import sys
+    eda = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if eda not in sys.path:
+        sys.path.insert(0, eda)
+    return importlib.import_module("strategy")
+
+
+def predict_a(n_top, n_others):
+    """The shipped step model for how many rivals sit on maximum cliques.
+
+    Lifted verbatim from eda/measure_pick.py, which is what the deployed
+    picker was measured with. Not re-derived here: the point is to score the
+    algorithm as it stands, not a cleaned-up version of it.
+    """
+    return (0.06 if n_top <= 5 else 1.00) * n_others
+
+
+@strategy("production")
+def production(rnd, q, score):
+    """The shipped picker: eda/strategy.plan(), called as slots() calls it."""
+    module = _production_module()
+    n_others = estimate_q_b(rnd)
+    a_hat = predict_a(rnd.n_top, n_others)
+    result = module.plan(q, rnd.omega, rnd.n_top, rnd.n_spare, n_others, a_hat,
+                         rnd.difficulty, b_hat=n_others - a_hat,
+                         held_top=rnd.n_top, held_spare=rnd.n_spare)
+    detail = result.detail
+    board = [(rnd.omega, m, 0) for m in detail["top_spread"] if m]
+    board += [(rnd.omega - 1, m, 0) for m in detail["spare_spread"] if m]
+    assert sum(b[1] for b in board) == q, (board, q)
+    return board
+
+
 @strategy("maximin")
 def maximin(rnd, q, score):
     """Picks the omega/omega-1 split against an ESTIMATED opponent count."""

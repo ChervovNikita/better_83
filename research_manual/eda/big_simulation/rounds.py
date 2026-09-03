@@ -10,8 +10,21 @@ REF_R = 1.5
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
-DEFAULT_POOL = os.path.join(_ROOT, "pool_n20.jsonl")
-DEFAULT_ROUNDS = os.path.join(_ROOT, "rounds.json")
+def _load_paths():
+    """Imports research_manual/paths.py, the project's own path registry."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rm_paths", os.path.join(_ROOT, "paths.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# research_manual moved its data under artifacts/ and now resolves it through
+# paths.py; follow that rather than keep a second copy of the layout here.
+_PATHS = _load_paths()
+DEFAULT_POOL = os.path.join(_PATHS.POOLS, "pool_n20.jsonl")
+DEFAULT_ROUNDS = _PATHS.ROUNDS_JSON
 
 DIFFICULTY_BY_NODES = ((290, 300, 0.7), (490, 500, 0.8),
                        (690, 700, 0.9), (890, 900, 1.0))

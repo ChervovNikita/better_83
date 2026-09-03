@@ -43,19 +43,25 @@ def bootstrap(rows, draws=4000, seed=0):
 
 def main():
     """Prints the merged table."""
-    out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HERE, "out")
+    strategy = sys.argv[1] if len(sys.argv) > 1 else "maximin"
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(_HERE, "out")
     by_split = {}
-    for path in sorted(glob.glob(os.path.join(out_dir, "bound_*.json"))):
+    # Group by (strategy, split): both strategies write into the same
+    # directory, and keying on the split alone silently merges them.
+    pattern = os.path.join(out_dir, "bound_%s_*.json" % strategy)
+    for path in sorted(glob.glob(pattern)):
         data = json.load(open(path))
+        assert data["strategy"] == strategy, (path, data["strategy"])
         entry = by_split.setdefault(data["g"], {"o": data["o"], "rows": [],
                                                 "cap": data["cap"], "shards": 0})
         entry["rows"] += data["rows"]
         entry["shards"] += 1
     assert by_split, out_dir
 
-    print("A vs the HYBRID BOUND: exact partial where affordable, full-sight")
-    print("otherwise. Full sight dominates partial information, so this is a")
-    print("LOWER bound on A's margin against a real partial-information rival.")
+    print("A = %s   vs the HYBRID BOUND: exact partial where affordable," % strategy)
+    print("full-sight otherwise.")
+    print("Full sight dominates partial information, so this is a LOWER bound")
+    print("on A's margin against a real partial-information rival.")
     print()
     print("%5s %5s %7s %8s | %10s %-20s %-8s | %s"
           % ("A", "B", "shards", "rounds", "pooled", "95% CI", "P(>0)",
