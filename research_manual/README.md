@@ -6,10 +6,8 @@ The solution, and the harness that measures it.
     solver.py       dispatch: picks a picker (SN83_PICKER) and a solver (SN83_SOLVER)
     paths.py        where the data lives -- change the layout here, not in every script
 
-    pick_derived.py    the shipped picker, derived from the reward algebra
-    pick_value.py      previous production picker (the baseline in every comparison)
-    pick_static.py     fixed-rule picker
-    fleet_pick.py      legacy picker
+    pick_derived.py    the picker: picker() plus picker_oracle()/picker_partial(),
+                       the position-aware bounds used in the comparison tables
 
     fleet_solver_gpu.py  GPU harvest (default)
     gpu_lib.py           build + ctypes bridge for clique_gpu.cu
@@ -18,6 +16,7 @@ The solution, and the harness that measures it.
     clique.cpp           the CPU solver
 
     metrics/    scoring a run: edge, bottom-10%, emission share (see metrics/README.md)
+    outdated/   superseded pickers and falsified probes; nothing imports them
     eda/        exploration: probes, one-off analyses, notebooks, dispatcher, docs
     artifacts/  everything that is data rather than code
 
@@ -35,9 +34,13 @@ Nothing under artifacts/ is tracked (`*.json`, `*.jsonl`, `*.so`, `*.png` are ig
 
 ## Running
 
-    SN83_FLEET_N=70 SN83_POOL_CACHE=research_manual/artifacts/cache/cache_latest100.jsonl \
-      SN83_PICKER=pick_derived:picker .venv/bin/python research_manual/simulate.py \
-      -N 70 --rounds 100000 --only research_manual/artifacts/rounds/latest100.txt --out /tmp/o.json
+    .venv/bin/python research_manual/simulate.py -N 70 --rounds 100000 \
+      --only latest100.txt \
+      --pool-cache research_manual/artifacts/cache/cache_latest100.jsonl \
+      --out /tmp/o.json
 
-The first run without `SN83_POOL_CACHE` harvests on the GPU and is slow; with a cache
-every picker sees an identical pool, which is what makes the comparison paired.
+`-N` is the fleet size, and `--only` takes a bare name resolved against
+artifacts/rounds/.  The first run without `--pool-cache` harvests on the GPU and is
+slow; with a cache every run sees an identical pool, which is what makes a comparison
+paired.  There are no SN83_* environment variables any more -- simulate.py asserts if
+one is set, so an old script fails loudly instead of silently running unconfigured.

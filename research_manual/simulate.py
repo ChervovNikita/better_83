@@ -335,17 +335,29 @@ def main():
     parser.add_argument("--dump", default=ROUNDS_PATH)
     parser.add_argument("--metagraph", default=METAGRAPH_PATH)
     parser.add_argument("--out", default=OUT_PATH)
+    parser.add_argument("--pool-cache", default="",
+                        help="pin the harvest so picker runs are paired")
+    parser.add_argument("--pool-k-mult", type=int, default=1)
+    parser.add_argument("--pool-dump", default="")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     assert args.N > 0
     assert args.rounds > 0
+    for stale in ("SN83_PICKER", "SN83_SOLVER", "SN83_FLEET_N",
+                  "SN83_POOL_CACHE", "SN83_POOL_K_MULT", "SN83_POOL_DUMP"):
+        assert stale not in os.environ, (
+            "%s is no longer read; pass --pool-cache / --pool-k-mult / --pool-dump, "
+            "and the fleet size is -N" % stale)
+    solver.configure(fleet_n=args.N, pool_cache=args.pool_cache,
+                     pool_k_mult=args.pool_k_mult, pool_dump=args.pool_dump)
     with open(args.metagraph) as handle:
         meta = json.load(handle)
     assert meta["miners"] == sorted(
         meta["miners"], key=lambda miner: (miner["incentive"], miner["uid"])
     )
     victims = pick_victims(meta, args.N)
-    rows = load_rounds(args.dump, args.rounds, args.only)
+    only = paths.rounds_list(args.only) if args.only else args.only
+    rows = load_rounds(args.dump, args.rounds, only)
     out, scores_by_hotkey, coldkey_of, n_queried, n_late = run(
         rows, victims
     )

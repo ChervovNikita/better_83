@@ -1,10 +1,4 @@
-"""Share of OUR hotkeys in the bottom 10%, cut at the FIELD-only percentile.
-
-Deregistration takes the worst miners, so what matters is not the mean edge but how
-many of ours sit in the tail.  The cut must come from the field alone: our own
-hotkeys are part of the population being ranked, so including them lets a fleet that
-is uniformly bad move the threshold down under itself and score well.
-"""
+"""Share of OUR hotkeys in the bottom 10%, cut at the FIELD-only percentile."""
 import json, statistics, collections, sys, os
 
 def bottom_share(path, pct=10.0):
@@ -32,8 +26,8 @@ def _pct(sorted_vals, pct):
     return sorted_vals[lo] + (i - lo) * (sorted_vals[hi] - sorted_vals[lo])
 
 if __name__ == "__main__":
-    # run directory holding the simulate.py outputs; override with SN83_RUN_DIR
-    # or argv[2] rather than editing this file.
+
+
     R = os.environ.get("SN83_RUN_DIR",
                        sys.argv[2] if len(sys.argv) > 2
                        else "/home/dev/autoresearch-runs/sn83-picker/")
