@@ -17,10 +17,7 @@ The solution, and the harness that measures it.
     fleet_solver.py      CPU harvest (SN83_SOLVER=cpu)
     clique.cpp           the CPU solver
 
-    metric_edge.py    our_average - field_average
-    metric_bottom.py  share of our hotkeys under the field-only 10th percentile
-    metric_share.py   emission share via the validator's own weighting
-
+    metrics/    scoring a run: edge, bottom-10%, emission share (see metrics/README.md)
     eda/        exploration: probes, one-off analyses, notebooks, dispatcher, docs
     artifacts/  everything that is data rather than code
 

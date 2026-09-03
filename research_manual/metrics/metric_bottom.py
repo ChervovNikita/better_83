@@ -32,7 +32,13 @@ def _pct(sorted_vals, pct):
     return sorted_vals[lo] + (i - lo) * (sorted_vals[hi] - sorted_vals[lo])
 
 if __name__ == "__main__":
-    R = "/home/dev/autoresearch-runs/sn83-picker/"
+    # run directory holding the simulate.py outputs; override with SN83_RUN_DIR
+    # or argv[2] rather than editing this file.
+    R = os.environ.get("SN83_RUN_DIR",
+                       sys.argv[2] if len(sys.argv) > 2
+                       else "/home/dev/autoresearch-runs/sn83-picker/")
+    if not R.endswith(os.sep):
+        R += os.sep
     variants = [("baseline", "final-base-N%d.json"), ("picker", "e2-blind-N%d.json"),
                 ("absolute", "abs-blind-N%d.json"),
                 ("TAIL", "tail-blind-N%d.json"),

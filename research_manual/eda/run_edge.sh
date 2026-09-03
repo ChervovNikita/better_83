@@ -46,6 +46,6 @@ for spec in "unified:pick_derived:picker_unified" "baseline:value"; do
       -N "$N" --rounds "$ROUNDS" $ONLY \
       --out "$OUT_DIR/edge-N${N}-${name}.json" >/dev/null 2>&1
   printf '   %-9s ' "$name"
-  .venv/bin/python research_manual/metric_edge.py \
+  .venv/bin/python research_manual/metrics/metric_edge.py \
       "$OUT_DIR/edge-N${N}-${name}.json" --json
 done
