@@ -21,7 +21,7 @@ reward distributions.
 | `--step` | 1 | stride over splits |
 | `--limit` | 0 | use only the first N rounds |
 | `--pool` | `research_manual/pool_n20.jsonl` | solved pool dump |
-| `--rounds` | `research_manual/rounds.json` | round dump holding the real answers |
+| `--rounds` | `research_manual/artifacts/data/rounds.json` | round dump holding the real answers |
 
 Writes `sweep_<strategy>_<responder>.json` and four images tagged the same way.
 

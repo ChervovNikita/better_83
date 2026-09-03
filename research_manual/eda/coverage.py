@@ -48,9 +48,9 @@ def main():
     import fit_field
 
     tune = json.load(open(os.path.join(HERE, "tuning_data.json")))
-    assert not (set(tune) & set(json.load(open(os.path.join(PARENT, "rounds.json"))))), \
+    assert not (set(tune) & set(json.load(open(os.path.join(PARENT, "artifacts", "data", "rounds.json"))))), \
         "eval leak"
-    meta = json.load(open(os.path.join(PARENT, "metagraph.json")))
+    meta = json.load(open(os.path.join(PARENT, "artifacts", "data", "metagraph.json")))
     dropped = fit_field.victims(meta, args.fleet)
 
     rows = sorted(tune.items(), key=lambda kv: kv[1]["timestamp"])

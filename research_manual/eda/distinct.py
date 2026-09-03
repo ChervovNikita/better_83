@@ -7,7 +7,7 @@ import os
 import statistics
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DUMP = os.path.join(HERE, "rounds.json")
+DEFAULT_DUMP = os.path.join(HERE, os.pardir, "artifacts", "data", "rounds.json")
 PREFIX_LEN = 8
 
 

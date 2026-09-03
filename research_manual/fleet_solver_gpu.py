@@ -8,7 +8,9 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PARENT = os.path.dirname(HERE)
+# fleet_solver.py used to live one directory up; it is a SIBLING now that the
+# solution files sit together at the top of research_manual/.
+PARENT = HERE
 for _p in (HERE, PARENT):
     if _p not in sys.path:
         sys.path.insert(0, _p)

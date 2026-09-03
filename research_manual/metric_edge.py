@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The search metric: our_median - field_median, from a simulate.py --out dump.
 
-    .venv/bin/python research_manual/eda/metric_edge.py <sim_out.json> [--json]
+    .venv/bin/python research_manual/metric_edge.py <sim_out.json> [--json]
 
 A hotkey's score is the mean of the per-round rewards the VALIDATOR assigned it
 -- simulate.py stores exactly what CliqueScoreCalculator returned, so this reads

@@ -27,13 +27,14 @@ import hashlib
 import json
 import math
 import os
+import sys
 import random
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-METAGRAPH = os.environ.get("SN83_METAGRAPH",
-                           os.path.join(os.path.dirname(HERE), "metagraph.json"))
-ROUNDS_PATH = os.environ.get("SN83_ROUNDS",
-                             os.path.join(os.path.dirname(HERE), "rounds.json"))
+sys.path.insert(0, HERE)
+import paths
+METAGRAPH = os.environ.get("SN83_METAGRAPH", paths.METAGRAPH_JSON)
+ROUNDS_PATH = os.environ.get("SN83_ROUNDS", paths.ROUNDS_JSON)
 
 REF_R = 1.5
 IMMUNITY_BLOCKS = 6000

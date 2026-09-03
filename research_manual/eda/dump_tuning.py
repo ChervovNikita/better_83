@@ -55,7 +55,7 @@ KEYS = [
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARENT = os.path.dirname(HERE)
-EVAL_PATH = os.path.join(PARENT, "rounds.json")
+EVAL_PATH = os.path.join(PARENT, "artifacts", "data", "rounds.json")
 DEST = os.path.join(HERE, "tuning_data.json")
 
 # rounds.json holds the newest 1000, so the tuning window sits below that. The

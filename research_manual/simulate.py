@@ -27,8 +27,10 @@ OUR_COLDKEY = "our_coldkey"
 MINER_ALPHA_DAY = 2951.6
 POWER_TARGET_TOP_HALF_SHARE = 0.80
 POWER_MAX_GAMMA = 32.0
-ROUNDS_PATH = os.path.join(HERE, "rounds.json")
-METAGRAPH_PATH = os.path.join(HERE, "metagraph.json")
+import paths
+
+ROUNDS_PATH = paths.ROUNDS_JSON
+METAGRAPH_PATH = paths.METAGRAPH_JSON
 OUT_PATH = os.path.join(HERE, "sim_out.json")
 
 

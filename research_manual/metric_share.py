@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Emission share, the quantity that actually pays.
 
-    .venv/bin/python research_manual/eda/metric_share.py <sim_out.json> [--json]
+    .venv/bin/python research_manual/metric_share.py <sim_out.json> [--json]
 
 `metric_edge.py` reports our_median - field_median. That is a rank statistic and
 NOT what a miner is paid: the validator turns per-hotkey mean scores into weights
@@ -21,7 +21,7 @@ import statistics
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PARENT = os.path.dirname(HERE)
+PARENT = HERE  # simulate.py is a sibling now, not one level up
 for _p in (PARENT, HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)

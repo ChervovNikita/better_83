@@ -8,7 +8,7 @@
 #   one dominant rival                          -> "duel"    -> exact J best response
 #   N >= SN83_MINIMAX_N (150)                   -> "minimax" -> mirror, J >= 0 guaranteed
 #
-# --cache reuses/creates research_manual/cache_n<N>_<tag>.jsonl so repeat runs skip
+# --cache reuses/creates research_manual/artifacts/cache/cache_n<N>_<tag>.jsonl so repeat runs skip
 # the GPU. WITHOUT it every round is solved fresh, which is the honest end-to-end
 # number and costs sum(time_limit - 2s) ~= 20 min per 100 rounds.
 set -euo pipefail
@@ -20,7 +20,7 @@ shift $(( $# > 1 ? 2 : 1 ))
 CACHE=""; ONLY=""; TAG="first${ROUNDS}"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --cache) CACHE="research_manual/cache_n${N}_${TAG}.jsonl"; shift ;;
+    --cache) CACHE="research_manual/artifacts/cache/cache_n${N}_${TAG}.jsonl"; shift ;;
     --only)  ONLY="--only $2"; TAG="$(basename "$2" .txt)"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -46,6 +46,6 @@ for spec in "unified:pick_derived:picker_unified" "baseline:value"; do
       -N "$N" --rounds "$ROUNDS" $ONLY \
       --out "$OUT_DIR/edge-N${N}-${name}.json" >/dev/null 2>&1
   printf '   %-9s ' "$name"
-  .venv/bin/python research_manual/eda/metric_edge.py \
+  .venv/bin/python research_manual/metric_edge.py \
       "$OUT_DIR/edge-N${N}-${name}.json" --json
 done

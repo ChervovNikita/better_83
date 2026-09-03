@@ -22,7 +22,7 @@ KEYS = [
     "miner_ans",
 ]
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEST = os.path.join(HERE, "rounds.json")
+DEST = os.path.join(HERE, os.pardir, "artifacts", "data", "rounds.json")
 
 
 def check_wandb_version():

@@ -8,8 +8,8 @@ import bittensor as bt
 
 NETUID = 83
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROUNDS_PATH = os.path.join(HERE, "rounds.json")
-DEST = os.path.join(HERE, "metagraph.json")
+ROUNDS_PATH = os.path.join(HERE, os.pardir, "artifacts", "data", "rounds.json")
+DEST = os.path.join(HERE, os.pardir, "artifacts", "data", "metagraph.json")
 BLOCK_MS = 12000
 
 

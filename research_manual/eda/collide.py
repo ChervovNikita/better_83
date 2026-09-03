@@ -7,8 +7,8 @@ import os
 import statistics
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DUMP = os.path.join(HERE, "rounds.json")
-DEFAULT_META = os.path.join(HERE, "metagraph.json")
+DEFAULT_DUMP = os.path.join(HERE, os.pardir, "artifacts", "data", "rounds.json")
+DEFAULT_META = os.path.join(HERE, os.pardir, "artifacts", "data", "metagraph.json")
 MERGED = "merged"
 PREFIX_LEN = 8
 
