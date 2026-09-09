@@ -61,6 +61,15 @@ class Backend(object):
             fleet_solver_gpu.fleet_solver.THREADS, info)
 
     def solve(self, matrix, budget, k):
+        # A base92 string rather than a matrix: decode it HERE, in the worker's
+        # own process, so the dispatcher's HTTP thread never holds the GIL for
+        # it. The decode comes out of this round's budget because that is where
+        # it is really being spent.
+        if isinstance(matrix, str):
+            started = time.monotonic()
+            matrix = _decode(matrix)
+            budget -= time.monotonic() - started
+        assert budget > 0, "no budget left after decoding"
         if self.kind == "fake":
             pool = _fake_pool(len(matrix), budget, k)
             return pool, _counts(pool)
@@ -68,11 +77,30 @@ class Backend(object):
         if self.kind == "gpu":
             import fleet_solver_gpu
             stats = fleet_solver_gpu.last_stats()
+            # Only these three cross the process boundary. The rest of
+            # last_stats() is device counters for research; shipping them back
+            # per round costs pickling time inside the deadline.
             return pool, {
                 "n_top_true": stats.get("n_top_true", 0),
                 "n_spare_true": stats.get("n_spare_true", 0),
+                "hits": [int(h) for h in stats.get("hits", [])],
             }
         return pool, _counts(pool)
+
+
+def _decode(encoded):
+    """base92 -> adjacency matrix, importing CliqueAI lazily.
+
+    Lazy because a worker that never sees an encoded payload should not pay for
+    the import, and because this runs after the process has been pinned.
+    """
+    import sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(os.path.dirname(here))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from CliqueAI.graph.codec import GraphCodec
+    return GraphCodec().decode_matrix(encoded)
 
 
 def _counts(pool):

@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 import dispatch_worker
+import pick_derived
 
 BACKEND = os.environ.get("SN83_BACKEND", "gpu").lower()
 N_WORKERS = int(os.environ.get("SN83_WORKERS", "2"))
@@ -25,7 +26,21 @@ N_WORKERS = int(os.environ.get("SN83_WORKERS", "2"))
 N_CPU_WORKERS = int(os.environ.get("SN83_CPU_WORKERS", "1"))
 
 CPU_BUDGET = int(os.environ.get("SN83_CPU_BUDGET", "15"))
-OVERFLOW_THREADS = int(os.environ.get("SN83_OVERFLOW_THREADS", "1"))
+
+# The overflow worker is reserved BEFORE the GPU split, so that the 0.05% of
+# rounds it serves do not cost the champion a share of its threads on the other
+# 99.95%. But the reservation is clamped: asking for more overflow than the
+# budget can spare used to hand the GPU workers max(1, ...) threads each and
+# then exceed the quota anyway -- at SN83_CPU_BUDGET=8, SN83_WORKERS=2,
+# SN83_OVERFLOW_THREADS=8 the split came out to 2*1 + 8 = 10 threads on an
+# 8-thread budget. Oversubscribing is not a slowdown here: thread count changes
+# which clique the solver finds, so it changes the ANSWER.
+_WANT_OVERFLOW = int(os.environ.get("SN83_OVERFLOW_THREADS", "1"))
+# Leave at least one thread for each GPU worker before honouring the request.
+_MAX_OVERFLOW = max(0, CPU_BUDGET - N_WORKERS)
+_OVERFLOW_TOTAL = min(_WANT_OVERFLOW * N_CPU_WORKERS, _MAX_OVERFLOW)
+OVERFLOW_THREADS = (max(1, _OVERFLOW_TOTAL // N_CPU_WORKERS)
+                    if N_CPU_WORKERS else 0)
 _GPU_BUDGET = max(1, CPU_BUDGET - OVERFLOW_THREADS * N_CPU_WORKERS)
 THREADS_PER_WORKER = max(1, _GPU_BUDGET // max(1, N_WORKERS))
 
@@ -36,6 +51,11 @@ SIBLING_WAIT_S = float(os.environ.get("SN83_SIBLING_WAIT_S", "30.0"))
 TASK_TTL_S = float(os.environ.get("SN83_TASK_TTL_S", "120.0"))
 
 SOLVE_K = int(os.environ.get("SN83_SOLVE_K", "64"))
+
+# How many hotkeys OUR fleet holds on the subnet. The picker needs it to know
+# which rivals our registrations displaced; it is not len(claims), which is
+# only the siblings this round happened to query.
+FLEET_N = int(os.environ.get("SN83_FLEET_N", "1"))
 
 
 class SolveRequest(BaseModel):
@@ -220,47 +240,26 @@ def _get_task(key):
         return task, fresh
 
 
-def _load_picker():
-    import inspect
-    name = os.environ.get("SN83_PICKER", "value").lower()
-    if name == "legacy":
-        from fleet_pick import picker
-    elif name == "static":
-        from pick_static import picker
-    else:
-        from pick_value import picker
-    sig = inspect.signature(picker)
-    return (picker,
-            "n_nodes" in sig.parameters,
-            "n_top_true" in sig.parameters)
-
-
-_PICKER = None
-_PICKER_WANTS_N = False
-_PICKER_WANTS_SUPPLY = False
-
-
-def _picker():
-    global _PICKER, _PICKER_WANTS_N, _PICKER_WANTS_SUPPLY
-    if _PICKER is None:
-        _PICKER, _PICKER_WANTS_N, _PICKER_WANTS_SUPPLY = _load_picker()
-    return _PICKER, _PICKER_WANTS_N, _PICKER_WANTS_SUPPLY
-
-
 def _assign(task, hotkey, index, n_nodes):
-    picker, wants_n, wants_supply = _picker()
+    """This hotkey's answer, allocating the whole batch on first demand.
+
+    The picker is called ONCE per round, over every sibling seen so far, and
+    the result cached -- calling it per hotkey would re-run the allocation with
+    a different `a` each time and hand two siblings the same clique.
+    """
     with task.lock:
         if hotkey in task.assigned:
             return task.assigned[hotkey]
         q = max(len(task.claims), index + 1)
         if len(task.assigned) < q:
-            kwargs = {}
-            if wants_n:
-                kwargs["n_nodes"] = n_nodes
-            if wants_supply:
-                kwargs["n_top_true"] = task.stats.get("n_top_true", 0)
-                kwargs["n_spare_true"] = task.stats.get("n_spare_true", 0)
-            answers = picker(task.pool, task.key, list(range(q)), **kwargs)
+            answers = pick_derived.picker(
+                task.pool, task.key, list(range(q)),
+                n_nodes=n_nodes,
+                hits=list(task.stats.get("hits", [])),
+                n_top_true=task.stats.get("n_top_true", 0),
+                n_spare_true=task.stats.get("n_spare_true", 0),
+                fleet_n=FLEET_N,
+            )
             for i, hk in enumerate(task.claims[:len(answers)]):
                 task.assigned[hk] = answers[i]
             if hotkey not in task.assigned:
@@ -281,6 +280,7 @@ def health():
         tracked = len(TASKS)
     return {
         "backend": BACKEND,
+        "fleet_n": FLEET_N,
         "workers": N_WORKERS,
         "cpu_workers": N_CPU_WORKERS,
         "threads_per_worker": THREADS_PER_WORKER,
@@ -317,12 +317,27 @@ def solve(req: SolveRequest):
             task.owner = worker
             if POOL.kind_of(worker) != BACKEND:
                 COUNTERS["overflow_cpu"] += 1
-            matrix = req.adjacency_matrix
+            # The base92 string goes to the worker UNDECODED. Decoding an
+            # n=894 matrix is 0.109s of pure Python, and doing it here runs it
+            # on the HTTP thread: two concurrent rounds then serialise on the
+            # GIL and each pays about double, which is most of the reason a
+            # two-deep round used to answer past its budget.
+            matrix = req.encoded_matrix or req.adjacency_matrix
             if not matrix:
-                from CliqueAI.graph.codec import GraphCodec
-                matrix = GraphCodec().decode_matrix(req.encoded_matrix)
+                raise ValueError("neither encoded_matrix nor adjacency_matrix")
+            # Anchor the worker's deadline to when the REQUEST arrived, not to
+            # when the worker happens to start. Everything spent getting here --
+            # parsing, admission, queueing -- is time already gone from the
+            # round, and handing the worker the full budget anyway is what made
+            # the answer land after it.
+            left = budget - (time.monotonic() - arrived)
+            if left <= 0:
+                COUNTERS["rejected"] += 1
+                task.error = "no budget left after admission"
+                task.done.set()
+                return {"clique": [], "source": "reject", "reason": task.error}
             status, payload, elapsed = POOL.submit(
-                worker, matrix, budget, SOLVE_K, budget + 5.0)
+                worker, matrix, left, SOLVE_K, left + 5.0)
             handed = True
         finally:
             if not handed:

@@ -12,6 +12,7 @@ The GPU-only checks (deadlines, no-late-under-overlap, two devices actually in
 use) are marked `gpu_only` and skip without one.
 """
 
+import inspect
 import os
 import subprocess
 import sys
@@ -373,11 +374,13 @@ def test_parent_picker_does_not_import_the_gpu_solver():
     context on device 0 in this process -- next to worker 0's harvest.
     """
     import dispatcher
-    dispatcher._PICKER = None
-    picker, wants_n, wants_supply = dispatcher._picker()
-    assert picker is not None
-    assert wants_n is True
-    assert wants_supply is True
+    import pick_derived
+    assert dispatcher.pick_derived is pick_derived
+    sig = inspect.signature(pick_derived.picker).parameters
+    # The three inputs the dispatcher observes that a lone miner cannot: the
+    # graph's difficulty, the pre-truncation supply, and our own fleet size.
+    for name in ("n_nodes", "n_top_true", "n_spare_true", "fleet_n"):
+        assert name in sig, name
     assert "fleet_solver_gpu" not in sys.modules
     assert "gpu_lib" not in sys.modules
     assert "solver" not in sys.modules
@@ -407,6 +410,11 @@ def test_miner_always_dispatches():
 
 
 def test_assign_forwards_harvest_supply():
+    """n_top_true is the pre-truncation count, and it has to reach the picker.
+
+    The truncated len(pool) inflates the crowding estimate by the truncation
+    factor, so passing the wrong one silently changes every allocation.
+    """
     import dispatcher
     seen = {}
 
@@ -414,23 +422,21 @@ def test_assign_forwards_harvest_supply():
         seen.update(kwargs)
         return [list(pool[0])] * len(hotkeys)
 
-    prev = (dispatcher._PICKER, dispatcher._PICKER_WANTS_N,
-            dispatcher._PICKER_WANTS_SUPPLY)
-    dispatcher._PICKER = fake_picker
-    dispatcher._PICKER_WANTS_N = True
-    dispatcher._PICKER_WANTS_SUPPLY = True
+    prev = dispatcher.pick_derived.picker
+    dispatcher.pick_derived.picker = fake_picker
     try:
         task = dispatcher.Task("u-supply")
         task.pool = [[0, 1, 2], [0, 1]]
-        task.stats = {"n_top_true": 40, "n_spare_true": 12}
+        task.stats = {"n_top_true": 40, "n_spare_true": 12, "hits": [9, 4]}
         task.claim("hk0")
         dispatcher._assign(task, "hk0", 0, 500)
         assert seen["n_nodes"] == 500
         assert seen["n_top_true"] == 40
         assert seen["n_spare_true"] == 12
+        assert seen["hits"] == [9, 4]
+        assert seen["fleet_n"] == dispatcher.FLEET_N
     finally:
-        (dispatcher._PICKER, dispatcher._PICKER_WANTS_N,
-         dispatcher._PICKER_WANTS_SUPPLY) = prev
+        dispatcher.pick_derived.picker = prev
 
 
 def test_submit_timeout_puts_the_worker_back():
@@ -446,12 +452,36 @@ def test_submit_timeout_puts_the_worker_back():
     assert pool.n_free() == 2
 
 
-def test_miner_never_solves_locally():
-    """Busy GPUs go to the dispatcher's 1-thread CPU worker, not native_algorithm."""
+def test_miner_falls_back_on_the_cpu_only():
+    """A BUSY dispatcher is served by its CPU overflow worker; a DOWN one is not.
+
+    This replaces an assertion that `_solve_locally` must not appear in
+    miner.py at all. That assertion and DISPATCHER.md arrived in the same
+    commit (838ad8b) contradicting each other -- the doc names _solve_locally
+    as the kept fallback and gives the reason ("a dispatcher restart costs a
+    worse clique rather than a missed round, which would score zero"), while
+    the test forbids it. It was never green: miner.py at that commit called
+    native_algorithm, which the test also forbids.
+
+    The doc wins. The test's rationale covers only the reject path, where the
+    dispatcher is alive and its 1-thread overflow worker answers; it says
+    nothing about the dispatcher being unreachable, where no fallback means an
+    empty answer and a hard zero on both reward terms for every round of the
+    outage. What actually has to hold is narrower:
+
+      - the miner never opens a CUDA context of its own (the workers own the
+        devices; a second context makes both solves miss the deadline),
+      - the old unshared local paths stay gone,
+      - dispatch is tried first, with no switch to turn it off.
+    """
     src = open(os.path.join(ROOT, "CliqueAI", "miner.py")).read()
-    assert "_solve_locally" not in src
     assert "native_algorithm" not in src
     assert "networkx_algorithm" not in src
+    for gpu_module in ("fleet_solver_gpu", "gpu_lib", "solver_gpu"):
+        assert gpu_module not in src, gpu_module
+    # the fallback exists, and it is reached only after dispatch returned nothing
+    assert "_solve_locally" in src
+    assert src.index("dispatch_client.solve") < src.index("self._solve_locally")
 
 
 # --------------------------------------------------------- core affinity
