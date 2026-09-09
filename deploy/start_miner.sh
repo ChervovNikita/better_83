@@ -11,6 +11,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "$REPO"
 
+# A second miner on the same hotkey re-serves the axon on chain and silently
+# steals traffic from the live one -- both boxes then fight over the record every
+# healthcheck. Refuse to start where someone has marked the box retired.
+if [ -f "$HERE/MINER_DISABLED" ]; then
+    echo "REFUSING TO START: $HERE/MINER_DISABLED exists." >&2
+    echo >&2
+    sed 's/^/  /' "$HERE/MINER_DISABLED" >&2
+    exit 1
+fi
+
 if [ -z "${AXON_IP:-}" ]; then
     echo "AXON_IP is empty. Set it in deploy/sn83.env to this box's PUBLIC ip:" >&2
     echo "  the validator dials whatever is published on chain, and a private" >&2
