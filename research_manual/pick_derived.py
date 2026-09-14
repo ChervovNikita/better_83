@@ -25,7 +25,7 @@ OPERATORS = {
     "e3": ("5GghBgin",),
 }
 
-TOP4_S_STAR = {0.7: 12, 0.8: 8, 0.9: 5, 1.0: 3}
+TOP4_S_STAR = {0.7: 11, 0.8: 7, 0.9: 5, 1.0: 3}
 
 
 REACH = {"e2": 0.96, "e3": 0.97}
@@ -38,6 +38,9 @@ REACH_CAP = 0.96
 _profile_cache = {}
 _victim_cache = {}
 _rounds_cache = {}
+
+NOISE_SD = 0.0          # 0 = exact occupancy; larger = worse per-clique knowledge
+_noise_auc = []         # (concordant, total) per round, for the realised AUC
 
 
 def selection_p(difficulty):
@@ -199,8 +202,13 @@ def c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min):
                 dists.append((m, occ))
         else:
             for m, f in zip(alloc, occ):
-                if m + f > 0:
-                    exact.append(float(m + f))
+                # occupancy may arrive as an EXPECTED count (fractional). c_min is a
+                # minimum over integer answer counts, so round before taking it --
+                # a raw 0.0001 would otherwise become the diversity numerator and
+                # collapse the whole term.
+                t = m + f
+                if t > 0.5:
+                    exact.append(max(1.0, float(round(t))))
     if field_min:
         exact.append(float(field_min))
 
@@ -303,6 +311,56 @@ def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
     return best
 
 
+def _cmin_targets(occ_top, occ_sp, budget):
+    """Floors worth trying: c_min can only be raised to just above an existing count."""
+    seen = {1}
+    for occ in (occ_top, occ_sp):
+        for f in occ:
+            if 0.0 < f <= budget:
+                seen.add(int(f) + 1)
+    return sorted(t for t in seen if t <= budget + 1)
+
+
+def _greedy_at_floor(occ_top, occ_sp, a_top, a_sp, a, b, floor):
+    """Greedy on sum m/(m+f), constrained so every occupied clique reaches `floor`.
+
+    j_marginal only sees one factor of J: the other is c_min, a minimum over the
+    occupied cliques that our own placement can lift. Topping every clique the
+    field already holds up to `floor` first, then spending what is left greedily,
+    enumerates the allocations that greedy alone cannot reach.
+    """
+    out = []
+    for occ, units in ((occ_top, a_top), (occ_sp, a_sp)):
+        alloc = [0] * len(occ)
+        if not occ:
+            out.append(alloc)
+            continue
+        need = 0
+        for i, f in enumerate(occ):
+            if 0.0 < f < floor:
+                alloc[i] = int(floor - f)
+                need += alloc[i]
+        if need > units:
+            return None
+        # an untouched clique holding f>0 already sits at f; an empty one we take
+        # would sit at m, so below the floor it may only be used at full depth
+        allowed = [i for i, f in enumerate(occ)
+                   if f > 0.0 or alloc[i] > 0 or floor <= 1]
+        if not allowed:
+            allowed = list(range(len(occ)))
+        for _ in range(units - need):
+            best_i = allowed[0]
+            best_d = -1e18
+            for i in allowed:
+                d = j_marginal(alloc[i], occ[i], a, b)
+                if d > best_d:
+                    best_d = d
+                    best_i = i
+            alloc[best_i] += 1
+        out.append(alloc)
+    return out[0], out[1]
+
+
 def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
              their_cliques, cap_top, cap_sp, field_min=1.0):
     """Best (alloc_top, alloc_sp) under eval_J."""
@@ -315,20 +373,20 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
                                    occ_top, occ_sp, f_top, f_sp, their_cliques,
                                    cap_top, cap_sp, field_min)
         else:
-            at = [0] * len(occ_top)
-            asp = [0] * len(occ_sp)
-            for target, occ, units in ((at, occ_top, a_top), (asp, occ_sp, a_sp)):
-                if not occ:
+            at, asp = None, None
+            best_inner = None
+            for floor in _cmin_targets(occ_top, occ_sp, a):
+                cand = _greedy_at_floor(occ_top, occ_sp, a_top, a_sp, a, b, floor)
+                if cand is None:
                     continue
-                for _ in range(units):
-                    best_i = 0
-                    best_d = -1e18
-                    for i, f in enumerate(occ):
-                        d = j_marginal(target[i], f, a, b)
-                        if d > best_d:
-                            best_d = d
-                            best_i = i
-                    target[best_i] += 1
+                v = eval_J(difficulty, omega, a, b, cand[0], cand[1],
+                           occ_top, occ_sp, f_top, f_sp, their_cliques, field_min)
+                if best_inner is None or v > best_inner:
+                    best_inner = v
+                    at, asp = cand
+            if at is None:
+                at = [0] * len(occ_top)
+                asp = [0] * len(occ_sp)
         j = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
                    f_top, f_sp, their_cliques, field_min)
         if best_j is None or j > best_j:
@@ -393,6 +451,97 @@ def _field_counter(uuid, fleet_n):
     victims = victim_hotkeys(fleet_n)
     return collections.Counter(tuple(sorted(x[3])) for x in rec["answers"]
                                if x[3] and x[1] not in victims)
+
+
+def _noisy_occ(uuid, level, occ, sd):
+    """Per-clique counts seen through a predictor of controllable quality.
+
+    The aggregates (how many rivals answer at each level) stay exact -- those are
+    inferable from the metagraph the way the blind picker already does. Only the
+    per-clique assignment is degraded, which is precisely what an occupancy model
+    would have to supply.
+    """
+    if sd <= 0.0:
+        return list(occ)
+    rng = random.Random("%s|%s|%.6f" % (uuid, level, sd))
+    # counts are integers: j_marginal branches on f > 0 and c_min_of takes a min
+    # over m + f, so a fractional 0.0001 reads as "occupied" and drives c_min to
+    # zero, collapsing the diversity term. Round back to a count.
+    return [float(max(0, int(round(f + rng.gauss(0.0, sd))))) for f in occ]
+
+
+def _record_auc(true_occ, seen):
+    """Within-round AUC of the noisy score for 'is this clique occupied'."""
+    pos = [s for f, s in zip(true_occ, seen) if f > 0]
+    neg = [s for f, s in zip(true_occ, seen) if f <= 0]
+    if not pos or not neg:
+        return
+    c = 0.0
+    for a in pos:
+        for b in neg:
+            c += 1.0 if a > b else (0.5 if a == b else 0.0)
+    _noise_auc.append((c, float(len(pos) * len(neg))))
+
+
+def picker_noisy(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                 n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Occupancy known only through a predictor of quality set by NOISE_SD."""
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    field = _field_counter(uuid, fleet_n or infer_fleet_n(a, difficulty))
+    f_top = float(sum(v for k, v in field.items() if len(k) == omega))
+    f_sp = float(sum(v for k, v in field.items() if len(k) == omega - 1))
+    b = max(1e-9, f_top + f_sp)
+    their_cliques = float(sum(1 for v in field.values() if v > 0))
+    true_t = [float(field[tuple(sorted(c))]) for c in top]
+    true_s = [float(field[tuple(sorted(c))]) for c in spare]
+    occ_t = _noisy_occ(uuid, "top", true_t, NOISE_SD)
+    occ_s = _noisy_occ(uuid, "spare", true_s, NOISE_SD)
+    _record_auc(true_t, occ_t)
+    ours = {tuple(sorted(c)) for c in top} | {tuple(sorted(c)) for c in spare}
+    held = [v for k, v in field.items() if v > 0 and k not in ours]
+    field_min = float(min(held)) if held else 0.0
+    at, asp = allocate(difficulty, omega, a, b, occ_t, occ_s,
+                       f_top, f_sp, their_cliques, len(top), len(spare), field_min)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
+
+
+MODEL_PRED = {}       # uuid -> {clique_json: [expected_count, raw_score]}
+MODEL_MODE = "expect"  # "expect" = calibrated E[count]; "binary" = thresholded class
+
+
+def _model_occ(uuid, cliques):
+    """Per-clique occupancy as the trained model sees it."""
+    tab = MODEL_PRED.get(str(uuid), {})
+    out = []
+    for c in cliques:
+        v = tab.get(json.dumps([int(x) for x in sorted(c)]))
+        e = 0.0 if v is None else float(v[0])
+        out.append(1.0 if (MODEL_MODE == "binary" and e >= 0.5) else
+                   (0.0 if MODEL_MODE == "binary" else e))
+    return out
+
+
+def picker_model(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
+                 n_top_true=0, n_spare_true=0, fleet_n=0):
+    """Occupancy supplied by the trained model, not by the round's truth."""
+    if difficulty is None:
+        difficulty = difficulty_from_n(n_nodes)
+    a = len(hotkeys)
+    omega, top, spare = _levels(pool)
+    rows = entity_plan(difficulty, max(len(top), 1), max(len(spare), 1),
+                       fleet_n or infer_fleet_n(a, difficulty))
+    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
+    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
+    b = max(1e-9, f_top + f_sp)
+    occ_t = _model_occ(uuid, top)
+    occ_s = _model_occ(uuid, spare)
+    their_cliques = float(sum(1 for x in occ_t + occ_s if x > 0.5))
+    at, asp = allocate(difficulty, omega, a, b, occ_t, occ_s, f_top, f_sp,
+                       max(1.0, their_cliques), len(top), len(spare), 0.0)
+    return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
 def picker_oracle(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,

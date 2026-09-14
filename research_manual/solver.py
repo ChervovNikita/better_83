@@ -17,7 +17,8 @@ LATENCY_S = 2.0
 
 FLEET_N = 0
 POOL_CACHE = ""
-POOL_K_MULT = 1
+POOL_CAP = 8192
+PICKER = "blind"
 POOL_DUMP = ""
 
 _cache = None
@@ -25,15 +26,24 @@ _cache_lock = threading.Lock()
 _dump_lock = threading.Lock()
 
 
-def configure(fleet_n, pool_cache="", pool_k_mult=1, pool_dump=""):
-    global FLEET_N, POOL_CACHE, POOL_K_MULT, POOL_DUMP, _cache
+def configure(fleet_n, pool_cache="", pool_dump="", picker="blind"):
+    global FLEET_N, POOL_CACHE, POOL_DUMP, PICKER, _cache
     assert fleet_n > 0, fleet_n
-    assert pool_k_mult >= 1, pool_k_mult
+    assert picker in _PICKERS, picker
     FLEET_N = int(fleet_n)
     POOL_CACHE = pool_cache
-    POOL_K_MULT = int(pool_k_mult)
     POOL_DUMP = pool_dump
+    PICKER = picker
     _cache = None
+
+
+_PICKERS = {
+    "blind": lambda *a, **k: pick_derived.picker(*a, **k),
+    "oracle": lambda *a, **k: pick_derived.picker_oracle(*a, **k),
+    "partial": lambda *a, **k: pick_derived.picker_partial(*a, **k),
+    "noisy": lambda *a, **k: pick_derived.picker_noisy(*a, **k),
+    "model": lambda *a, **k: pick_derived.picker_model(*a, **k),
+}
 
 
 def solve_many(matrix, time_limit, k):
@@ -121,7 +131,7 @@ def solve(hotkeys, adjacency_matrix, time_limit, uuid):
     budget = time_limit - LATENCY_S
     assert budget > 0, time_limit
     matrix = np.asarray(adjacency_matrix, dtype=np.uint8)
-    want = len(hotkeys) * POOL_K_MULT
+    want = POOL_CAP
 
     cached = _cache_get(uuid, want) if POOL_CACHE else None
     if cached is not None:
@@ -135,7 +145,7 @@ def solve(hotkeys, adjacency_matrix, time_limit, uuid):
         if POOL_CACHE:
             _cache_put(uuid, want, pool, stats)
 
-    answers = pick_derived.picker(
+    answers = _PICKERS[PICKER](
         pool, uuid, list(hotkeys),
         n_nodes=matrix.shape[0],
         hits=list(stats.get("hits", [])),

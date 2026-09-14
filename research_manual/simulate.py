@@ -224,6 +224,11 @@ def report(scores_by_hotkey, coldkey_of, our_hotkeys, verbose):
     field_means = list(field.values())
     print(f"median_all_miners\t{statistics.median(field_means):.4f}")
     our_share = by_cold_share.get(OUR_COLDKEY, 0.0)
+    import pick_derived
+    if pick_derived._noise_auc:
+        c = sum(x for x, _ in pick_derived._noise_auc)
+        t = sum(y for _, y in pick_derived._noise_auc)
+        print("occupancy_auc\t%.4f" % (c / t))
     print(f"expected_share\t{our_share:.4%}")
     print(f"expected_alpha/day\t{our_share * MINER_ALPHA_DAY:.1f}")
 
@@ -337,19 +342,38 @@ def main():
     parser.add_argument("--out", default=OUT_PATH)
     parser.add_argument("--pool-cache", default="",
                         help="pin the harvest so picker runs are paired")
-    parser.add_argument("--pool-k-mult", type=int, default=1)
     parser.add_argument("--pool-dump", default="")
+    parser.add_argument("--picker", default="blind",
+                        choices=("blind", "oracle", "partial", "noisy", "model"))
+    parser.add_argument("--model-pred", default="")
+    parser.add_argument("--model-mode", default="expect",
+                        choices=("expect", "binary"))
+    parser.add_argument("--picker-noise", type=float, default=0.0)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     assert args.N > 0
     assert args.rounds > 0
     for stale in ("SN83_PICKER", "SN83_SOLVER", "SN83_FLEET_N",
-                  "SN83_POOL_CACHE", "SN83_POOL_K_MULT", "SN83_POOL_DUMP"):
+                  "SN83_POOL_CACHE", "SN83_POOL_DUMP"):
         assert stale not in os.environ, (
-            "%s is no longer read; pass --pool-cache / --pool-k-mult / --pool-dump, "
+            "%s is no longer read; pass --pool-cache / --pool-dump, "
             "and the fleet size is -N" % stale)
+    # the picker reads its own metagraph and rounds file; without this it models
+    # a different field than the one being scored here
+    import pick_derived
+    pick_derived.METAGRAPH = args.metagraph
+    pick_derived.ROUNDS_PATH = args.dump
+    pick_derived._profile_cache.clear()
+    pick_derived._victim_cache.clear()
+    pick_derived._rounds_cache.clear()
     solver.configure(fleet_n=args.N, pool_cache=args.pool_cache,
-                     pool_k_mult=args.pool_k_mult, pool_dump=args.pool_dump)
+                     pool_dump=args.pool_dump, picker=args.picker)
+    pick_derived.NOISE_SD = args.picker_noise
+    if args.model_pred:
+        pick_derived.MODEL_PRED = json.load(open(args.model_pred))
+        pick_derived.MODEL_MODE = args.model_mode
+        print("model_pred\t%s\tmode\t%s" % (args.model_pred, args.model_mode))
+    print("picker\t%s\tnoise\t%.3f" % (args.picker, args.picker_noise))
     with open(args.metagraph) as handle:
         meta = json.load(handle)
     assert meta["miners"] == sorted(
