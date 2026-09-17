@@ -44,6 +44,31 @@ OVERFLOW_THREADS = (max(1, _OVERFLOW_TOTAL // N_CPU_WORKERS)
 _GPU_BUDGET = max(1, CPU_BUDGET - OVERFLOW_THREADS * N_CPU_WORKERS)
 THREADS_PER_WORKER = max(1, _GPU_BUDGET // max(1, N_WORKERS))
 
+
+def gpu_thread_plan(n_workers, gpu_budget):
+    """Even split, then leftover cores onto the GPUs that actually run.
+
+    acquire() walks device 0, then 1, then 2, then 3. One-deep is 81% of
+    rounds, two-deep is 19%, three-deep is 0.1%. Spreading a remainder of 3
+    as +1/+1/+1 would spend two extra threads on cards that almost never
+    fire. +2 on gpu0 and +1 on gpu1 puts them where the work is.
+    """
+    if n_workers <= 0:
+        return []
+    base = max(1, gpu_budget // n_workers)
+    leftover = max(0, gpu_budget - base * n_workers)
+    plan = [base] * n_workers
+    if leftover:
+        take = min(2, leftover)
+        plan[0] += take
+        leftover -= take
+        if leftover and n_workers > 1:
+            plan[1] += leftover
+    return plan
+
+
+GPU_THREADS = gpu_thread_plan(N_WORKERS, _GPU_BUDGET)
+
 LATENCY_S = float(os.environ.get("SN83_LATENCY_S", "2.0"))
 
 SIBLING_WAIT_S = float(os.environ.get("SN83_SIBLING_WAIT_S", "30.0"))
@@ -96,10 +121,18 @@ class WorkerPool(object):
             avail = sorted(os.sched_getaffinity(0))
         except (AttributeError, OSError):
             avail = list(range(os.cpu_count() or 1))
+        gpu_threads = None if isinstance(threads, int) else list(threads)
         plan = []
         cursor = 0
+        gi = 0
         for _kind, device in specs:
-            want = threads if device is not None else overflow_threads
+            if device is None:
+                want = overflow_threads
+            elif gpu_threads is None:
+                want = threads
+            else:
+                want = gpu_threads[gi]
+                gi += 1
             take = avail[cursor:cursor + want]
             if len(take) < want:
                 take = avail[-want:] if want <= len(avail) else avail
@@ -112,6 +145,16 @@ class WorkerPool(object):
         self.n = len(self.specs)
         self.threads = threads
         self.overflow_threads = overflow_threads
+        self.thread_plan = []
+        gi = 0
+        for _kind, device in self.specs:
+            if device is None:
+                self.thread_plan.append(overflow_threads)
+            elif isinstance(threads, int):
+                self.thread_plan.append(threads)
+            else:
+                self.thread_plan.append(threads[gi])
+                gi += 1
         self.cores = self.core_plan(self.specs, threads, overflow_threads)
         self.ctx = mp.get_context("spawn")
         self.req_qs = []
@@ -139,7 +182,7 @@ class WorkerPool(object):
 
     def _spawn_one(self, i):
         kind, device = self.specs[i]
-        threads = self.threads if device is not None else self.overflow_threads
+        threads = self.thread_plan[i]
         ready = self.ctx.Queue()
         q = self.ctx.Queue()
         p = self.ctx.Process(
@@ -236,7 +279,7 @@ app = FastAPI(title="sn83 solve dispatcher")
 _SPECS = [(BACKEND, i) for i in range(N_WORKERS)]
 _SPECS += [("fake" if BACKEND == "fake" else "cpu", None)
            for _ in range(N_CPU_WORKERS)]
-POOL = WorkerPool(_SPECS, THREADS_PER_WORKER, OVERFLOW_THREADS)
+POOL = WorkerPool(_SPECS, GPU_THREADS, OVERFLOW_THREADS)
 TASKS = {}
 TASKS_LOCK = threading.Lock()
 COUNTERS = {"served": 0, "rejected": 0, "sibling": 0, "error": 0, "late": 0,
@@ -302,6 +345,7 @@ def health():
         "workers": N_WORKERS,
         "cpu_workers": N_CPU_WORKERS,
         "threads_per_worker": THREADS_PER_WORKER,
+        "gpu_threads": list(GPU_THREADS),
         "overflow_threads": OVERFLOW_THREADS,
         "core_plan": POOL.cores,
         "workers_free": POOL.n_free(),

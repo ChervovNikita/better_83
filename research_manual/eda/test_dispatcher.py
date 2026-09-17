@@ -63,8 +63,10 @@ def test_health_reports_live_workers(client):
     assert h["workers"] == int(os.environ.get("SN83_WORKERS", "4"))
     assert h["workers_free"] >= 1, h["worker_info"]
     # the CPU budget must be split, never handed to each worker in full
-    assert h["threads_per_worker"] * h["workers"] <= int(
-        os.environ.get("SN83_CPU_BUDGET", "15"))
+    budget = int(os.environ.get("SN83_CPU_BUDGET", "15"))
+    assert h["threads_per_worker"] * h["workers"] <= budget
+    assert "gpu_threads" in h
+    assert sum(h["gpu_threads"]) + h["overflow_threads"] * h["cpu_workers"] <= budget
 
 
 def test_single_solve_returns_a_clique(client):
@@ -350,7 +352,7 @@ def test_gpu_workers_get_the_whole_quota(client):
     """
     h = client.get("/health").json()
     budget = int(os.environ.get("SN83_CPU_BUDGET", "15"))
-    gpu_total = h["threads_per_worker"] * h["workers"]
+    gpu_total = sum(h["gpu_threads"])
     total = gpu_total + h["overflow_threads"] * h["cpu_workers"]
     assert total <= budget, "oversubscribed: %s" % h
     assert gpu_total > budget // 2, (
@@ -364,7 +366,7 @@ def test_health_reports_the_overflow_counter(client):
 
 
 @pytest.mark.parametrize("workers,budget", [(1, 15), (2, 15), (3, 15), (2, 8),
-                                            (4, 32), (4, 40)])
+                                            (4, 32), (4, 20)])
 def test_thread_split_never_oversubscribes(workers, budget, monkeypatch):
     """The arithmetic, for every fleet shape -- not just the one under test.
 
@@ -377,15 +379,15 @@ def test_thread_split_never_oversubscribes(workers, budget, monkeypatch):
     monkeypatch.setenv("SN83_BACKEND", "fake")
     import dispatcher
     mod = importlib.reload(dispatcher)
-    total = (mod.THREADS_PER_WORKER * mod.N_WORKERS
+    total = (sum(mod.GPU_THREADS)
              + mod.OVERFLOW_THREADS * mod.N_CPU_WORKERS)
-    assert total <= budget, (workers, budget, mod.THREADS_PER_WORKER,
+    assert total <= budget, (workers, budget, mod.GPU_THREADS,
                              mod.OVERFLOW_THREADS)
     assert mod.THREADS_PER_WORKER >= 1 and mod.OVERFLOW_THREADS >= 1
-    if workers == 4 and budget == 40:
-        # Production shape: each GPU stays at the 8 the solver was tuned at.
-        assert mod.THREADS_PER_WORKER == 8
-        assert mod.OVERFLOW_THREADS == 8
+    if workers == 4 and budget == 20:
+        # This box: leftover 3 of 19 GPU cores go +2 to gpu0, +1 to gpu1.
+        assert mod.GPU_THREADS == [6, 5, 4, 4]
+        assert mod.OVERFLOW_THREADS == 1
 
 
 # --------------------------------------------------- parent must not touch CUDA
@@ -529,20 +531,43 @@ def test_core_plan_is_disjoint_and_fits(n_gpu, threads, overflow):
     assert len(seen) == n_gpu * threads + overflow, plan
 
 
-@pytest.mark.parametrize("n_gpu,threads,overflow", [(2, 7, 1), (4, 8, 8)])
+@pytest.mark.parametrize("n_gpu,threads,overflow", [(2, 7, 1), (4, 4, 1)])
 def test_core_plan_matches_the_thread_budget(n_gpu, threads, overflow):
     import dispatcher
     specs = [("gpu", i) for i in range(n_gpu)] + [("cpu", None)]
     plan = dispatcher.WorkerPool.core_plan(specs, threads=threads,
                                            overflow_threads=overflow)
-    assert [len(c) for c in plan] == [threads] * n_gpu + [overflow], plan
+    want = [threads] * n_gpu if isinstance(threads, int) else list(threads)
+    assert [len(c) for c in plan] == want + [overflow], plan
+
+
+def test_core_plan_honours_uneven_gpu_threads():
+    """Leftover cores pin to gpu0 and gpu1, not shared across the pool."""
+    import dispatcher
+    specs = [("gpu", i) for i in range(4)] + [("cpu", None)]
+    plan = dispatcher.WorkerPool.core_plan(specs, threads=[6, 5, 4, 4],
+                                           overflow_threads=1)
+    assert [len(c) for c in plan] == [6, 5, 4, 4, 1], plan
+    seen = set()
+    for cores in plan:
+        assert not (seen & set(cores)), "workers share cores: %s" % plan
+        seen |= set(cores)
+
+
+def test_gpu_thread_plan_gives_leftovers_to_the_busy_cards():
+    import dispatcher
+    assert dispatcher.gpu_thread_plan(4, 16) == [4, 4, 4, 4]
+    assert dispatcher.gpu_thread_plan(4, 19) == [6, 5, 4, 4]
+    assert dispatcher.gpu_thread_plan(4, 18) == [6, 4, 4, 4]
+    assert dispatcher.gpu_thread_plan(4, 17) == [5, 4, 4, 4]
+    assert dispatcher.gpu_thread_plan(2, 15) == [8, 7]
 
 
 def test_core_plan_survives_fewer_cores_than_budget():
     """A box smaller than the budget must still give every worker cores."""
     import dispatcher
     specs = [("gpu", i) for i in range(4)] + [("cpu", None)]
-    plan = dispatcher.WorkerPool.core_plan(specs, threads=8, overflow_threads=8)
+    plan = dispatcher.WorkerPool.core_plan(specs, threads=4, overflow_threads=1)
     assert all(p for p in plan), plan
 
 

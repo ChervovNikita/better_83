@@ -103,8 +103,12 @@ solve beats N unshared ones.
 workers=1 -> gpu 1x14 + overflow 1x1 = 15
 workers=2 -> gpu 2x7  + overflow 1x1 = 15
 workers=3 -> gpu 3x4  + overflow 1x1 = 13
-workers=4 -> gpu 4x3  + overflow 1x1 = 13
+workers=4 -> gpu 5+3+3+3 + overflow 1x1 = 15
 ```
+
+Leftover cores after the even GPU split go +2 to gpu0 and the rest to gpu1 --
+those two cards take 99.9% of rounds. On this box (budget 20, overflow 1) that
+is 6+5+4+4+1.
 
 Giving the overflow worker an equal share would cost the champion a third of its
 threads on 99.95% of rounds to serve the 0.05% case. Taking the *remainder*
@@ -159,7 +163,7 @@ The four `gpu_only` tests are the ones that matter:
 | variable | default | meaning |
 |---|---|---|
 | `SN83_BACKEND` | `gpu` | `gpu` / `cpu` / `fake` |
-| `SN83_WORKERS` | `4` | GPU workers, one per device; acquired 0 then 1 then 2 then 3, CPU last |
+| `SN83_WORKERS` | `4` | GPU workers, one per device; acquired 0 then 1 then 2 then 3, CPU last. Leftover CPU threads go +2 to gpu0, +1 to gpu1 |
 | `SN83_CPU_WORKERS` | `1` | overflow workers, no device |
 | `SN83_CPU_BUDGET` | `15` | CFS quota to divide |
 | `SN83_OVERFLOW_THREADS` | `1` | reserved before the GPU split |

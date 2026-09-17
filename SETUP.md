@@ -34,8 +34,11 @@ Requirements:
 - **GPUs:** 4×. 18.9% of rounds are two-deep concurrent, so one GPU means both
   solves miss their deadline; two covers 99.9%. Four means the CPU overflow
   worker is reached only at five-deep concurrency, which has never been
-  observed. A 4090 (sm_89) is plenty.
-- **CPU:** the solver was tuned at 8 threads per worker; you want ~40 cores free.
+  observed. This box is 4× RTX A4000 (sm_86).
+- **CPU:** this box is 20 cores (`nproc`). After reserving 1 for overflow the
+  even GPU split is 4 each; leftover cores go +2 to gpu0 and +1 to gpu1
+  (6+5+4+4+1). The solver was tuned at 8; we do not have the 32 disjoint
+  cores that would take.
 - **Inbound TCP:** you must be able to accept connections on some port. See §5.
 
 ---
@@ -92,9 +95,10 @@ uv tool install bittensor-cli
 
 ### TRAP: GPU architecture
 
-`gpu_lib.py` defaults to `SN83_GPU_ARCH=86`. A 4090 is **sm_89**. The wrong arch
-still builds and runs — through PTX JIT, silently slower. Set it in
-`deploy/sn83.env`. Check yours with `nvidia-smi --query-gpu=compute_cap --format=csv`.
+`gpu_lib.py` defaults to `SN83_GPU_ARCH=86`. This box is 4× A4000, also **sm_86**.
+A 4090 is sm_89; the wrong arch still builds and runs — through PTX JIT, silently
+slower. Set it in `deploy/sn83.env`. Check yours with
+`nvidia-smi --query-gpu=compute_cap --format=csv`.
 
 ---
 
@@ -177,9 +181,9 @@ Everything is in one file. The settings that are decisions, not defaults:
 
 | setting | why |
 |---|---|
-| `SN83_GPU_ARCH` | your GPU's compute capability; 89 for a 4090 |
-| `SN83_CPU_BUDGET=40` | 4×8 GPU + 8 overflow on disjoint cores |
-| `SN83_OVERFLOW_THREADS=8` | the tuned thread count, not the cramped default of 1 |
+| `SN83_GPU_ARCH` | your GPU's compute capability; 86 for an A4000 |
+| `SN83_CPU_BUDGET=20` | this box's core count; 6+5+4+4 GPU + 1 overflow |
+| `SN83_OVERFLOW_THREADS=1` | last resort; do not reserve 8 of 20 for a path that does not run |
 | `SN83_FLEET_N` | your registered hotkey count — **raise it when you add hotkeys** |
 | `AXON_PORT` / `AXON_EXTERNAL_PORT` / `AXON_IP` | see §5 |
 

@@ -1,6 +1,6 @@
 # SN83 miner — runbook for this box
 
-4× RTX 4090 (sm_89), 46 cores, no root, no CFS cap.
+4× RTX A4000 (sm_86), 20 cores, no root, no CFS cap.
 
 Two processes: **one dispatcher** owning all four GPUs, and **one miner per hotkey**
 talking to it over localhost. The miner never touches a GPU itself.
@@ -86,15 +86,17 @@ Both scripts source it. The settings that are decisions rather than defaults:
 
 | setting | value | why |
 |---|---|---|
-| `SN83_GPU_ARCH` | `89` | 4090 is sm_89; gpu_lib defaults to 86, which runs only through PTX JIT |
-| `SN83_CPU_BUDGET` | `40` | 4×8 GPU + 8 overflow, on 40 of 46 disjoint cores |
-| `SN83_OVERFLOW_THREADS` | `8` | the tuned thread count, not the cramped default of 1 |
+| `SN83_GPU_ARCH` | `86` | A4000 is sm_86, same as gpu_lib's default |
+| `SN83_CPU_BUDGET` | `20` | this box's core count (`nproc`); 6+5+4+4 GPU + 1 overflow |
+| `SN83_OVERFLOW_THREADS` | `1` | last resort; reserving 8 of 20 would drop every GPU worker to 3 threads |
 | `SN83_FLEET_N` | `1` | our registered hotkey count — **raise it when you add hotkeys** |
 | `--neuron.autoupdate 0` | (in start_miner.sh) | autoupdate `git pull`s on every 12s tick; against a branch with local changes the pull fails, the miner exits, the supervisor restarts it, and it never serves a request |
 
 **Thread count changes the ANSWER here, not just the speed.** The solver was
 tuned at 8 threads and every number in `research_manual/` was measured there.
-`SN83_CPU_BUDGET=40` is what keeps each worker at exactly 8.
+`SN83_CPU_BUDGET=20` is this box. Four workers at the tuned 8 would need 32
+disjoint cores we do not have. The even split is 4 each; leftover cores go
++2 to gpu0 and +1 to gpu1, which take 99.9% of rounds: 6+5+4+4+1.
 
 ## Keeping the metagraph fresh
 
