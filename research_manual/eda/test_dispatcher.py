@@ -4,14 +4,15 @@
 No GPU:
     SN83_BACKEND=fake .venv/bin/pytest research_manual/eda/test_dispatcher.py -v
 
-On the 2xGPU pod, the same file against real workers:
-    SN83_BACKEND=gpu SN83_WORKERS=2 \
+On the 4xGPU pod, the same file against real workers:
+    SN83_BACKEND=gpu SN83_WORKERS=4 \
       .venv/bin/pytest research_manual/eda/test_dispatcher.py -v -m "not fake_only"
 
-The GPU-only checks (deadlines, no-late-under-overlap, two devices actually in
+The GPU-only checks (deadlines, no-late-under-overlap, four devices actually in
 use) are marked `gpu_only` and skip without one.
 """
 
+import inspect
 import os
 import subprocess
 import sys
@@ -59,11 +60,13 @@ def _req(uid, hotkey, n=120, tl=8.0, seed=0):
 
 def test_health_reports_live_workers(client):
     h = client.get("/health").json()
-    assert h["workers"] == int(os.environ.get("SN83_WORKERS", "2"))
+    assert h["workers"] == int(os.environ.get("SN83_WORKERS", "4"))
     assert h["workers_free"] >= 1, h["worker_info"]
     # the CPU budget must be split, never handed to each worker in full
-    assert h["threads_per_worker"] * h["workers"] <= int(
-        os.environ.get("SN83_CPU_BUDGET", "15"))
+    budget = int(os.environ.get("SN83_CPU_BUDGET", "15"))
+    assert h["threads_per_worker"] * h["workers"] <= budget
+    assert "gpu_threads" in h
+    assert sum(h["gpu_threads"]) + h["overflow_threads"] * h["cpu_workers"] <= budget
 
 
 def test_single_solve_returns_a_clique(client):
@@ -126,7 +129,7 @@ def test_rejects_rather_than_queues_when_all_workers_busy(client):
     on both terms; refusing leaves the caller its whole budget for a local
     fallback.
     """
-    n_task = int(os.environ.get("SN83_WORKERS", "2")) + 3
+    n_task = int(os.environ.get("SN83_WORKERS", "4")) + 3
     out = {}
 
     def go(i):
@@ -195,14 +198,15 @@ def test_two_concurrent_tasks_both_meet_their_deadline(client):
 
 @gpu_only
 def test_both_devices_are_actually_used(client):
-    """Two workers, two contexts -- not two workers sharing device 0."""
+    """One worker per card -- not four workers sharing device 0."""
     import subprocess
     q = subprocess.run(
         ["nvidia-smi", "--query-compute-apps=pid,gpu_uuid",
          "--format=csv,noheader"], capture_output=True, text=True)
     devices = {line.split(",")[-1].strip() for line in q.stdout.splitlines()
                if line.strip()}
-    assert len(devices) >= 2, "workers are not on separate devices: %r" % (
+    want = int(os.environ.get("SN83_WORKERS", "4"))
+    assert len(devices) >= want, "workers are not on separate devices: %r" % (
         q.stdout,)
 
 
@@ -293,6 +297,23 @@ def test_miner_imports_with_dispatch_disabled():
     assert "parsed" in r.stdout, r.stderr
 
 
+# --------------------------------------------------- acquire order
+
+def test_acquire_prefers_gpus_in_device_order_then_cpu():
+    """gpu0, then gpu1, then gpu2, then gpu3, and only then the CPU worker.
+
+    The free list is deliberately scrambled so a leftover-from-release order
+    cannot masquerade as the policy.
+    """
+    import dispatcher
+    pool = dispatcher.WorkerPool(
+        [("gpu", 0), ("gpu", 1), ("gpu", 2), ("gpu", 3), ("cpu", None)],
+        threads=1, overflow_threads=1)
+    pool.free = [4, 2, 0, 3, 1]
+    assert [pool.acquire() for _ in range(5)] == [0, 1, 2, 3, 4]
+    assert pool.acquire() is None
+
+
 # --------------------------------------------------- CPU overflow worker
 
 def test_cpu_worker_absorbs_overflow_instead_of_rejecting(client):
@@ -304,7 +325,7 @@ def test_cpu_worker_absorbs_overflow_instead_of_rejecting(client):
     worker turns the (N_WORKERS + 1)-th concurrent task into one shared CPU
     solve instead.
     """
-    n_gpu = int(os.environ.get("SN83_WORKERS", "2"))
+    n_gpu = int(os.environ.get("SN83_WORKERS", "4"))
     out = {}
 
     def go(i):
@@ -331,7 +352,7 @@ def test_gpu_workers_get_the_whole_quota(client):
     """
     h = client.get("/health").json()
     budget = int(os.environ.get("SN83_CPU_BUDGET", "15"))
-    gpu_total = h["threads_per_worker"] * h["workers"]
+    gpu_total = sum(h["gpu_threads"])
     total = gpu_total + h["overflow_threads"] * h["cpu_workers"]
     assert total <= budget, "oversubscribed: %s" % h
     assert gpu_total > budget // 2, (
@@ -344,7 +365,8 @@ def test_health_reports_the_overflow_counter(client):
     assert "overflow_cpu" in h["counters"]
 
 
-@pytest.mark.parametrize("workers,budget", [(1, 15), (2, 15), (3, 15), (2, 8), (4, 32)])
+@pytest.mark.parametrize("workers,budget", [(1, 15), (2, 15), (3, 15), (2, 8),
+                                            (4, 32), (4, 20)])
 def test_thread_split_never_oversubscribes(workers, budget, monkeypatch):
     """The arithmetic, for every fleet shape -- not just the one under test.
 
@@ -357,11 +379,15 @@ def test_thread_split_never_oversubscribes(workers, budget, monkeypatch):
     monkeypatch.setenv("SN83_BACKEND", "fake")
     import dispatcher
     mod = importlib.reload(dispatcher)
-    total = (mod.THREADS_PER_WORKER * mod.N_WORKERS
+    total = (sum(mod.GPU_THREADS)
              + mod.OVERFLOW_THREADS * mod.N_CPU_WORKERS)
-    assert total <= budget, (workers, budget, mod.THREADS_PER_WORKER,
+    assert total <= budget, (workers, budget, mod.GPU_THREADS,
                              mod.OVERFLOW_THREADS)
     assert mod.THREADS_PER_WORKER >= 1 and mod.OVERFLOW_THREADS >= 1
+    if workers == 4 and budget == 20:
+        # This box: leftover 3 of 19 GPU cores go +2 to gpu0, +1 to gpu1.
+        assert mod.GPU_THREADS == [6, 5, 4, 4]
+        assert mod.OVERFLOW_THREADS == 1
 
 
 # --------------------------------------------------- parent must not touch CUDA
@@ -373,11 +399,13 @@ def test_parent_picker_does_not_import_the_gpu_solver():
     context on device 0 in this process -- next to worker 0's harvest.
     """
     import dispatcher
-    dispatcher._PICKER = None
-    picker, wants_n, wants_supply = dispatcher._picker()
-    assert picker is not None
-    assert wants_n is True
-    assert wants_supply is True
+    import pick_derived
+    assert dispatcher.pick_derived is pick_derived
+    sig = inspect.signature(pick_derived.picker).parameters
+    # The three inputs the dispatcher observes that a lone miner cannot: the
+    # graph's difficulty, the pre-truncation supply, and our own fleet size.
+    for name in ("n_nodes", "n_top_true", "n_spare_true", "fleet_n"):
+        assert name in sig, name
     assert "fleet_solver_gpu" not in sys.modules
     assert "gpu_lib" not in sys.modules
     assert "solver" not in sys.modules
@@ -407,6 +435,11 @@ def test_miner_always_dispatches():
 
 
 def test_assign_forwards_harvest_supply():
+    """n_top_true is the pre-truncation count, and it has to reach the picker.
+
+    The truncated len(pool) inflates the crowding estimate by the truncation
+    factor, so passing the wrong one silently changes every allocation.
+    """
     import dispatcher
     seen = {}
 
@@ -414,23 +447,21 @@ def test_assign_forwards_harvest_supply():
         seen.update(kwargs)
         return [list(pool[0])] * len(hotkeys)
 
-    prev = (dispatcher._PICKER, dispatcher._PICKER_WANTS_N,
-            dispatcher._PICKER_WANTS_SUPPLY)
-    dispatcher._PICKER = fake_picker
-    dispatcher._PICKER_WANTS_N = True
-    dispatcher._PICKER_WANTS_SUPPLY = True
+    prev = dispatcher.pick_derived.picker
+    dispatcher.pick_derived.picker = fake_picker
     try:
         task = dispatcher.Task("u-supply")
         task.pool = [[0, 1, 2], [0, 1]]
-        task.stats = {"n_top_true": 40, "n_spare_true": 12}
+        task.stats = {"n_top_true": 40, "n_spare_true": 12, "hits": [9, 4]}
         task.claim("hk0")
         dispatcher._assign(task, "hk0", 0, 500)
         assert seen["n_nodes"] == 500
         assert seen["n_top_true"] == 40
         assert seen["n_spare_true"] == 12
+        assert seen["hits"] == [9, 4]
+        assert seen["fleet_n"] == dispatcher.FLEET_N
     finally:
-        (dispatcher._PICKER, dispatcher._PICKER_WANTS_N,
-         dispatcher._PICKER_WANTS_SUPPLY) = prev
+        dispatcher.pick_derived.picker = prev
 
 
 def test_submit_timeout_puts_the_worker_back():
@@ -446,12 +477,36 @@ def test_submit_timeout_puts_the_worker_back():
     assert pool.n_free() == 2
 
 
-def test_miner_never_solves_locally():
-    """Busy GPUs go to the dispatcher's 1-thread CPU worker, not native_algorithm."""
+def test_miner_falls_back_on_the_cpu_only():
+    """A BUSY dispatcher is served by its CPU overflow worker; a DOWN one is not.
+
+    This replaces an assertion that `_solve_locally` must not appear in
+    miner.py at all. That assertion and DISPATCHER.md arrived in the same
+    commit (838ad8b) contradicting each other -- the doc names _solve_locally
+    as the kept fallback and gives the reason ("a dispatcher restart costs a
+    worse clique rather than a missed round, which would score zero"), while
+    the test forbids it. It was never green: miner.py at that commit called
+    native_algorithm, which the test also forbids.
+
+    The doc wins. The test's rationale covers only the reject path, where the
+    dispatcher is alive and its 1-thread overflow worker answers; it says
+    nothing about the dispatcher being unreachable, where no fallback means an
+    empty answer and a hard zero on both reward terms for every round of the
+    outage. What actually has to hold is narrower:
+
+      - the miner never opens a CUDA context of its own (the workers own the
+        devices; a second context makes both solves miss the deadline),
+      - the old unshared local paths stay gone,
+      - dispatch is tried first, with no switch to turn it off.
+    """
     src = open(os.path.join(ROOT, "CliqueAI", "miner.py")).read()
-    assert "_solve_locally" not in src
     assert "native_algorithm" not in src
     assert "networkx_algorithm" not in src
+    for gpu_module in ("fleet_solver_gpu", "gpu_lib", "solver_gpu"):
+        assert gpu_module not in src, gpu_module
+    # the fallback exists, and it is reached only after dispatch returned nothing
+    assert "_solve_locally" in src
+    assert src.index("dispatch_client.solve") < src.index("self._solve_locally")
 
 
 # --------------------------------------------------------- core affinity
@@ -476,18 +531,43 @@ def test_core_plan_is_disjoint_and_fits(n_gpu, threads, overflow):
     assert len(seen) == n_gpu * threads + overflow, plan
 
 
-def test_core_plan_matches_the_thread_budget():
+@pytest.mark.parametrize("n_gpu,threads,overflow", [(2, 7, 1), (4, 4, 1)])
+def test_core_plan_matches_the_thread_budget(n_gpu, threads, overflow):
     import dispatcher
-    specs = [("gpu", 0), ("gpu", 1), ("cpu", None)]
-    plan = dispatcher.WorkerPool.core_plan(specs, threads=7, overflow_threads=1)
-    assert [len(c) for c in plan] == [7, 7, 1], plan
+    specs = [("gpu", i) for i in range(n_gpu)] + [("cpu", None)]
+    plan = dispatcher.WorkerPool.core_plan(specs, threads=threads,
+                                           overflow_threads=overflow)
+    want = [threads] * n_gpu if isinstance(threads, int) else list(threads)
+    assert [len(c) for c in plan] == want + [overflow], plan
+
+
+def test_core_plan_honours_uneven_gpu_threads():
+    """Leftover cores pin to gpu0 and gpu1, not shared across the pool."""
+    import dispatcher
+    specs = [("gpu", i) for i in range(4)] + [("cpu", None)]
+    plan = dispatcher.WorkerPool.core_plan(specs, threads=[6, 5, 4, 4],
+                                           overflow_threads=1)
+    assert [len(c) for c in plan] == [6, 5, 4, 4, 1], plan
+    seen = set()
+    for cores in plan:
+        assert not (seen & set(cores)), "workers share cores: %s" % plan
+        seen |= set(cores)
+
+
+def test_gpu_thread_plan_gives_leftovers_to_the_busy_cards():
+    import dispatcher
+    assert dispatcher.gpu_thread_plan(4, 16) == [4, 4, 4, 4]
+    assert dispatcher.gpu_thread_plan(4, 19) == [6, 5, 4, 4]
+    assert dispatcher.gpu_thread_plan(4, 18) == [6, 4, 4, 4]
+    assert dispatcher.gpu_thread_plan(4, 17) == [5, 4, 4, 4]
+    assert dispatcher.gpu_thread_plan(2, 15) == [8, 7]
 
 
 def test_core_plan_survives_fewer_cores_than_budget():
     """A box smaller than the budget must still give every worker cores."""
     import dispatcher
-    specs = [("gpu", 0), ("gpu", 1), ("cpu", None)]
-    plan = dispatcher.WorkerPool.core_plan(specs, threads=7, overflow_threads=1)
+    specs = [("gpu", i) for i in range(4)] + [("cpu", None)]
+    plan = dispatcher.WorkerPool.core_plan(specs, threads=4, overflow_threads=1)
     assert all(p for p in plan), plan
 
 
