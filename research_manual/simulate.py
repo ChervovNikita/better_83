@@ -224,12 +224,14 @@ def report(scores_by_hotkey, coldkey_of, our_hotkeys, verbose):
     field_means = list(field.values())
     print(f"median_all_miners\t{statistics.median(field_means):.4f}")
     our_share = by_cold_share.get(OUR_COLDKEY, 0.0)
-    import pick_derived
-    if pick_derived._noise_auc:
-        c = sum(x for x, _ in pick_derived._noise_auc)
-        t = sum(y for _, y in pick_derived._noise_auc)
-        print("occupancy_auc\t%.4f" % (c / t))
-    print(f"expected_share\t{our_share:.4%}")
+    # gamma is re-fit per run, so this is a nonlinear function of the
+    # per-hotkey means and is NOT comparable across different --rounds.
+    import minimax
+    if minimax.STATS["maximin"] or minimax.STATS["fallback"]:
+        tot = minimax.STATS["maximin"] + minimax.STATS["fallback"]
+        print("maximin_rounds\t%d/%d\tfell_back\t%d"
+              % (minimax.STATS["maximin"], tot, minimax.STATS["fallback"]))
+    print(f"expected_share\t{our_share:.4%}\t(run-length dependent)")
     print(f"expected_alpha/day\t{our_share * MINER_ALPHA_DAY:.1f}")
 
     our_pct = []
@@ -344,11 +346,13 @@ def main():
                         help="pin the harvest so picker runs are paired")
     parser.add_argument("--pool-dump", default="")
     parser.add_argument("--picker", default="blind",
-                        choices=("blind", "oracle", "partial", "noisy", "model"))
-    parser.add_argument("--model-pred", default="")
-    parser.add_argument("--model-mode", default="expect",
-                        choices=("expect", "binary"))
-    parser.add_argument("--picker-noise", type=float, default=0.0)
+                        choices=("blind", "oracle", "partial", "minimax"))
+    parser.add_argument("--solve-budget-s", type=float, default=None,
+                        help="whole-solver wall clock: harvest + picker")
+    parser.add_argument("--harvest-cap-s", type=float, default=None,
+                        help="hard ceiling on the harvest, every round")
+    parser.add_argument("--minimax-n", type=int, default=None,
+                        help="fleet size at/above which maximin replaces the derived picker")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     assert args.N > 0
@@ -367,13 +371,12 @@ def main():
     pick_derived._victim_cache.clear()
     pick_derived._rounds_cache.clear()
     solver.configure(fleet_n=args.N, pool_cache=args.pool_cache,
-                     pool_dump=args.pool_dump, picker=args.picker)
-    pick_derived.NOISE_SD = args.picker_noise
-    if args.model_pred:
-        pick_derived.MODEL_PRED = json.load(open(args.model_pred))
-        pick_derived.MODEL_MODE = args.model_mode
-        print("model_pred\t%s\tmode\t%s" % (args.model_pred, args.model_mode))
-    print("picker\t%s\tnoise\t%.3f" % (args.picker, args.picker_noise))
+                     pool_dump=args.pool_dump, picker=args.picker,
+                     minimax_n=args.minimax_n,
+                     harvest_cap_s=args.harvest_cap_s,
+                     solve_budget_s=args.solve_budget_s)
+    print("picker\t%s\tminimax_n\t%s\teffective\t%s"
+          % (args.picker, args.minimax_n, solver.effective_picker()))
     with open(args.metagraph) as handle:
         meta = json.load(handle)
     assert meta["miners"] == sorted(

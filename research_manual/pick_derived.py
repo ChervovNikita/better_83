@@ -39,9 +39,6 @@ _profile_cache = {}
 _victim_cache = {}
 _rounds_cache = {}
 
-NOISE_SD = 0.0          # 0 = exact occupancy; larger = worse per-clique knowledge
-_noise_auc = []         # (concordant, total) per round, for the realised AUC
-
 
 def selection_p(difficulty):
     """MinerSelector.miner_selection_probabilities, per hotkey per round."""
@@ -451,97 +448,6 @@ def _field_counter(uuid, fleet_n):
     victims = victim_hotkeys(fleet_n)
     return collections.Counter(tuple(sorted(x[3])) for x in rec["answers"]
                                if x[3] and x[1] not in victims)
-
-
-def _noisy_occ(uuid, level, occ, sd):
-    """Per-clique counts seen through a predictor of controllable quality.
-
-    The aggregates (how many rivals answer at each level) stay exact -- those are
-    inferable from the metagraph the way the blind picker already does. Only the
-    per-clique assignment is degraded, which is precisely what an occupancy model
-    would have to supply.
-    """
-    if sd <= 0.0:
-        return list(occ)
-    rng = random.Random("%s|%s|%.6f" % (uuid, level, sd))
-    # counts are integers: j_marginal branches on f > 0 and c_min_of takes a min
-    # over m + f, so a fractional 0.0001 reads as "occupied" and drives c_min to
-    # zero, collapsing the diversity term. Round back to a count.
-    return [float(max(0, int(round(f + rng.gauss(0.0, sd))))) for f in occ]
-
-
-def _record_auc(true_occ, seen):
-    """Within-round AUC of the noisy score for 'is this clique occupied'."""
-    pos = [s for f, s in zip(true_occ, seen) if f > 0]
-    neg = [s for f, s in zip(true_occ, seen) if f <= 0]
-    if not pos or not neg:
-        return
-    c = 0.0
-    for a in pos:
-        for b in neg:
-            c += 1.0 if a > b else (0.5 if a == b else 0.0)
-    _noise_auc.append((c, float(len(pos) * len(neg))))
-
-
-def picker_noisy(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
-                 n_top_true=0, n_spare_true=0, fleet_n=0):
-    """Occupancy known only through a predictor of quality set by NOISE_SD."""
-    if difficulty is None:
-        difficulty = difficulty_from_n(n_nodes)
-    a = len(hotkeys)
-    omega, top, spare = _levels(pool)
-    field = _field_counter(uuid, fleet_n or infer_fleet_n(a, difficulty))
-    f_top = float(sum(v for k, v in field.items() if len(k) == omega))
-    f_sp = float(sum(v for k, v in field.items() if len(k) == omega - 1))
-    b = max(1e-9, f_top + f_sp)
-    their_cliques = float(sum(1 for v in field.values() if v > 0))
-    true_t = [float(field[tuple(sorted(c))]) for c in top]
-    true_s = [float(field[tuple(sorted(c))]) for c in spare]
-    occ_t = _noisy_occ(uuid, "top", true_t, NOISE_SD)
-    occ_s = _noisy_occ(uuid, "spare", true_s, NOISE_SD)
-    _record_auc(true_t, occ_t)
-    ours = {tuple(sorted(c)) for c in top} | {tuple(sorted(c)) for c in spare}
-    held = [v for k, v in field.items() if v > 0 and k not in ours]
-    field_min = float(min(held)) if held else 0.0
-    at, asp = allocate(difficulty, omega, a, b, occ_t, occ_s,
-                       f_top, f_sp, their_cliques, len(top), len(spare), field_min)
-    return _emit(uuid, hotkeys, top, spare, at, asp)
-
-
-MODEL_PRED = {}       # uuid -> {clique_json: [expected_count, raw_score]}
-MODEL_MODE = "expect"  # "expect" = calibrated E[count]; "binary" = thresholded class
-
-
-def _model_occ(uuid, cliques):
-    """Per-clique occupancy as the trained model sees it."""
-    tab = MODEL_PRED.get(str(uuid), {})
-    out = []
-    for c in cliques:
-        v = tab.get(json.dumps([int(x) for x in sorted(c)]))
-        e = 0.0 if v is None else float(v[0])
-        out.append(1.0 if (MODEL_MODE == "binary" and e >= 0.5) else
-                   (0.0 if MODEL_MODE == "binary" else e))
-    return out
-
-
-def picker_model(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
-                 n_top_true=0, n_spare_true=0, fleet_n=0):
-    """Occupancy supplied by the trained model, not by the round's truth."""
-    if difficulty is None:
-        difficulty = difficulty_from_n(n_nodes)
-    a = len(hotkeys)
-    omega, top, spare = _levels(pool)
-    rows = entity_plan(difficulty, max(len(top), 1), max(len(spare), 1),
-                       fleet_n or infer_fleet_n(a, difficulty))
-    f_top = sum(q for lvl, q, _d, _m in rows if lvl == "top")
-    f_sp = sum(q for lvl, q, _d, _m in rows if lvl == "spare")
-    b = max(1e-9, f_top + f_sp)
-    occ_t = _model_occ(uuid, top)
-    occ_s = _model_occ(uuid, spare)
-    their_cliques = float(sum(1 for x in occ_t + occ_s if x > 0.5))
-    at, asp = allocate(difficulty, omega, a, b, occ_t, occ_s, f_top, f_sp,
-                       max(1.0, their_cliques), len(top), len(spare), 0.0)
-    return _emit(uuid, hotkeys, top, spare, at, asp)
 
 
 def picker_oracle(pool, uuid, hotkeys, difficulty=None, n_nodes=None, hits=None,
