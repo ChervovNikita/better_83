@@ -1,0 +1,11 @@
+This box is RETIRED. Do not start a miner here.
+
+2026-09-09 04:31 UTC the hotkey 5Dt9t8fncC1bTPX5FKMY8sVKBvdbjsx7atEzfCpVhqPEo5MX
+was served from a new host (76.27.73.50:15199, Salt Lake City). This box's
+healthcheck saw the change as drift and re-served the old China address over it
+at block 9027641, pointing validators back at a box that loses ~38% of requests.
+
+One miner per hotkey. Two boxes running deploy/start_miner.sh with the same
+wallet will trade the on-chain axon record back and forth on every healthcheck.
+
+Delete this file only if this box is genuinely meant to serve the hotkey again.
