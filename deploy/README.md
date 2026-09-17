@@ -1,13 +1,15 @@
 # SN83 miner — runbook for this box
 
-2× RTX 4090 (sm_89), 46 cores, no root, no CFS cap.
+4× RTX 4090 (sm_89), 46 cores, no root, no CFS cap.
 
-Two processes: **one dispatcher** owning both GPUs, and **one miner per hotkey**
+Two processes: **one dispatcher** owning all four GPUs, and **one miner per hotkey**
 talking to it over localhost. The miner never touches a GPU itself.
 
     validator --> miner (axon) --> dispatcher --> worker[gpu0]
                     |                          \- worker[gpu1]
-                    |                          \- worker[cpu]  (overflow)
+                    |                          \- worker[gpu2]
+                    |                          \- worker[gpu3]
+                    |                          \- worker[cpu]  (overflow; last resort)
                     \- local CPU fallback, only if the dispatcher is unreachable
 
 ## Why the dispatcher exists
@@ -29,7 +31,7 @@ the fleet a config change rather than a rewrite.
 ## First run
 
     deploy/refresh_metagraph.sh      # picker's field model; must exist
-    deploy/start_dispatcher.sh       # builds both native libs, warms both GPUs
+    deploy/start_dispatcher.sh       # builds both native libs, warms all four GPUs
     deploy/start_miner.sh            # wallet must be restored and registered
     deploy/monitor.sh                # what the validators scored us
 
@@ -85,14 +87,14 @@ Both scripts source it. The settings that are decisions rather than defaults:
 | setting | value | why |
 |---|---|---|
 | `SN83_GPU_ARCH` | `89` | 4090 is sm_89; gpu_lib defaults to 86, which runs only through PTX JIT |
-| `SN83_CPU_BUDGET` | `24` | 2×8 GPU + 8 overflow, on 24 of 46 disjoint cores |
+| `SN83_CPU_BUDGET` | `40` | 4×8 GPU + 8 overflow, on 40 of 46 disjoint cores |
 | `SN83_OVERFLOW_THREADS` | `8` | the tuned thread count, not the cramped default of 1 |
 | `SN83_FLEET_N` | `1` | our registered hotkey count — **raise it when you add hotkeys** |
 | `--neuron.autoupdate 0` | (in start_miner.sh) | autoupdate `git pull`s on every 12s tick; against a branch with local changes the pull fails, the miner exits, the supervisor restarts it, and it never serves a request |
 
 **Thread count changes the ANSWER here, not just the speed.** The solver was
 tuned at 8 threads and every number in `research_manual/` was measured there.
-`SN83_CPU_BUDGET=24` is what keeps each worker at exactly 8.
+`SN83_CPU_BUDGET=40` is what keeps each worker at exactly 8.
 
 ## Keeping the metagraph fresh
 
@@ -120,7 +122,8 @@ snapshot or the other, never half.
 - `late` — answers that overran the internal budget. Should stay 0.
 - `rejected` — all workers busy. Occasional is by design (rejecting instantly
   leaves the miner its budget); sustained means you need more workers.
-- `overflow_cpu` — rounds that fell to the CPU worker. Expected ~19% two-deep.
+- `overflow_cpu` — rounds that fell to the CPU worker. With 4 GPUs this is
+  five-deep concurrency and should stay at 0.
 - `error` — worker crashes. Investigate any.
 
 `pm2 restart` reuses the environment captured at `pm2 start`, so after editing

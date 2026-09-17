@@ -31,9 +31,11 @@ Requirements:
 
 - **Location:** US or EU. Somewhere validators reach without crossing a national
   firewall. (Validators observed on SN83: Los Angeles, Albuquerque.)
-- **GPUs:** 2× is the sweet spot. 18.9% of rounds are two-deep concurrent, so one
-  GPU means both solves miss their deadline. A 4090 (sm_89) is plenty.
-- **CPU:** the solver was tuned at 8 threads per worker; you want ~24 cores free.
+- **GPUs:** 4×. 18.9% of rounds are two-deep concurrent, so one GPU means both
+  solves miss their deadline; two covers 99.9%. Four means the CPU overflow
+  worker is reached only at five-deep concurrency, which has never been
+  observed. A 4090 (sm_89) is plenty.
+- **CPU:** the solver was tuned at 8 threads per worker; you want ~40 cores free.
 - **Inbound TCP:** you must be able to accept connections on some port. See §5.
 
 ---
@@ -176,7 +178,7 @@ Everything is in one file. The settings that are decisions, not defaults:
 | setting | why |
 |---|---|
 | `SN83_GPU_ARCH` | your GPU's compute capability; 89 for a 4090 |
-| `SN83_CPU_BUDGET=24` | 2×8 GPU + 8 overflow on disjoint cores |
+| `SN83_CPU_BUDGET=40` | 4×8 GPU + 8 overflow on disjoint cores |
 | `SN83_OVERFLOW_THREADS=8` | the tuned thread count, not the cramped default of 1 |
 | `SN83_FLEET_N` | your registered hotkey count — **raise it when you add hotkeys** |
 | `AXON_PORT` / `AXON_EXTERNAL_PORT` / `AXON_IP` | see §5 |
@@ -245,7 +247,7 @@ change.** Re-read them and update `sn83.env` before starting.
 ## 6. Start it
 
 ```bash
-deploy/start_dispatcher.sh    # builds both native libs, warms both GPUs, waits for ready
+deploy/start_dispatcher.sh    # builds both native libs, warms all four GPUs, waits for ready
 deploy/start_miner.sh         # one process per hotkey
 deploy/monitor.sh --limit 30  # what the validators scored
 ```
@@ -393,7 +395,7 @@ Two known failures, both pre-existing and outside the production path:
 ## 11. What good looks like
 
 ```
-dispatcher: 3/3 workers free, served=N late=0 error=0 rejected=0
+dispatcher: 5/5 workers free, served=N late=0 error=0 rejected=0
 requests handled in the last 25 min: 8-12
 axon on chain: <ingress-ip>:<external-port> (matches sn83.env)
 0 problem(s)

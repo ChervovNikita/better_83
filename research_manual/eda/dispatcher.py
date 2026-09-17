@@ -21,7 +21,7 @@ import dispatch_worker
 import pick_derived
 
 BACKEND = os.environ.get("SN83_BACKEND", "gpu").lower()
-N_WORKERS = int(os.environ.get("SN83_WORKERS", "2"))
+N_WORKERS = int(os.environ.get("SN83_WORKERS", "4"))
 
 N_CPU_WORKERS = int(os.environ.get("SN83_CPU_WORKERS", "1"))
 
@@ -167,10 +167,26 @@ class WorkerPool(object):
             done.set()
 
     def acquire(self):
+        """Lowest free GPU first (device 0, 1, 2, 3), overflow CPU last.
+
+        Five concurrent rounds is the only way to reach the CPU worker. That
+        has never been observed -- two-deep is 19%, three-deep is 0.1%, and
+        five-deep is not in the 9584-round sample -- so overflow is last
+        resort, not a mode.
+        """
         with self.lock:
             if not self.free:
                 return None
-            self.free.sort()
+
+            def _order(i):
+                _kind, device = self.specs[i]
+                # A device index means a GPU (or fake stand-in). None is the
+                # overflow worker and always sorts after every GPU.
+                if device is not None:
+                    return (0, device, i)
+                return (1, 0, i)
+
+            self.free.sort(key=_order)
             return self.free.pop(0)
 
     def release(self, worker):
@@ -215,6 +231,8 @@ class WorkerPool(object):
 
 
 app = FastAPI(title="sn83 solve dispatcher")
+# GPU workers first (device 0, 1, 2, 3, ...), overflow CPU last. acquire()
+# walks that order, so a free GPU is always taken before the CPU worker.
 _SPECS = [(BACKEND, i) for i in range(N_WORKERS)]
 _SPECS += [("fake" if BACKEND == "fake" else "cpu", None)
            for _ in range(N_CPU_WORKERS)]

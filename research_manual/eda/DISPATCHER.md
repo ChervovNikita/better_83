@@ -30,6 +30,8 @@ simultaneous solves      rounds    share
 ```
 
 So 2 GPUs cover 99.9%, and the 19% two-deep case is routine, not an edge case.
+4 GPUs push the overflow path to five-deep concurrency, which is not in the
+sample -- the CPU worker is last resort, not a mode.
 
 **Sibling allocation.** In production each hotkey is its own miner process, so it
 sees `q = 1` and cannot know how many siblings were queried — yet the picker's
@@ -101,6 +103,7 @@ solve beats N unshared ones.
 workers=1 -> gpu 1x14 + overflow 1x1 = 15
 workers=2 -> gpu 2x7  + overflow 1x1 = 15
 workers=3 -> gpu 3x4  + overflow 1x1 = 13
+workers=4 -> gpu 4x3  + overflow 1x1 = 13
 ```
 
 Giving the overflow worker an equal share would cost the champion a third of its
@@ -115,11 +118,11 @@ bug the sibling test caught.
 ## Running it
 
 ```bash
-# 1. the service, one per box, owns both GPUs
-SN83_BACKEND=gpu SN83_WORKERS=2 SN83_CPU_BUDGET=15 \
+# 1. the service, one per box, owns all four GPUs
+SN83_BACKEND=gpu SN83_WORKERS=4 SN83_CPU_BUDGET=15 \
   .venv/bin/uvicorn research_manual.eda.dispatcher:app --host 127.0.0.1 --port 8899
 
-curl -s 127.0.0.1:8899/health | python3 -m json.tool     # wait for both workers
+curl -s 127.0.0.1:8899/health | python3 -m json.tool     # wait for all workers
 
 # 2. one miner per hotkey
 SN83_THREADS=1 ./start_miner.sh \
@@ -142,21 +145,21 @@ it locates relative to its own file. Deploying `CliqueAI/` without
 
 ```bash
 SN83_BACKEND=fake .venv/bin/pytest research_manual/eda/test_dispatcher.py -v   # no GPU
-SN83_BACKEND=gpu SN83_WORKERS=2 .venv/bin/pytest research_manual/eda/test_dispatcher.py -v
+SN83_BACKEND=gpu SN83_WORKERS=4 .venv/bin/pytest research_manual/eda/test_dispatcher.py -v
 ```
 
 The four `gpu_only` tests are the ones that matter:
 
 - `test_two_concurrent_tasks_both_meet_their_deadline` — the failure this exists to prevent
 - `test_owner_answers_inside_the_deadline` at 7.5 s and 15 s
-- `test_both_devices_are_actually_used` — that the workers are not both on device 0
+- `test_both_devices_are_actually_used` — that the workers are not all on device 0
 
 ## Environment
 
 | variable | default | meaning |
 |---|---|---|
 | `SN83_BACKEND` | `gpu` | `gpu` / `cpu` / `fake` |
-| `SN83_WORKERS` | `2` | GPU workers, one per device |
+| `SN83_WORKERS` | `4` | GPU workers, one per device; acquired 0 then 1 then 2 then 3, CPU last |
 | `SN83_CPU_WORKERS` | `1` | overflow workers, no device |
 | `SN83_CPU_BUDGET` | `15` | CFS quota to divide |
 | `SN83_OVERFLOW_THREADS` | `1` | reserved before the GPU split |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The solve service: owns both GPUs, batches siblings per round, admits or
+# The solve service: owns all four GPUs, batches siblings per round, admits or
 # rejects. Start this BEFORE any miner -- a miner whose dispatcher is down
 # answers from its local CPU fallback, which is strictly worse.
 set -euo pipefail
@@ -32,7 +32,7 @@ pm2 start "$VENV/bin/uvicorn" --name sn83-dispatcher --cwd "$REPO" \
     research_manual.eda.dispatcher:app \
     --host "$SN83_DISPATCH_HOST" --port "$SN83_DISPATCH_PORT"
 
-echo "waiting for both workers to warm..."
+echo "waiting for all workers to warm..."
 for i in $(seq 1 60); do
     if "$PY" -c "
 import json,sys,urllib.request
