@@ -53,7 +53,7 @@ def main():
     a=ap.parse_args()
     global ORDER; ORDER=a.order
     pick_derived.picker=picker
-    solver.configure(fleet_n=a.N,pool_cache=a.pool_cache,pool_k_mult=a.pool_k_mult)
+    solver.configure(fleet_n=a.N,pool_cache=a.pool_cache)
     meta=json.load(open(a.data+"/data/metagraph.json"))
     victims=simulate.pick_victims(meta,a.N)
     rows=simulate.load_rounds(a.data+"/data/rounds.json",100000,a.only)

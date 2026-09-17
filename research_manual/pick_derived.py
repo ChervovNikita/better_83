@@ -25,7 +25,7 @@ OPERATORS = {
     "e3": ("5GghBgin",),
 }
 
-TOP4_S_STAR = {0.7: 12, 0.8: 8, 0.9: 5, 1.0: 3}
+TOP4_S_STAR = {0.7: 11, 0.8: 7, 0.9: 5, 1.0: 3}
 
 
 REACH = {"e2": 0.96, "e3": 0.97}
@@ -199,8 +199,13 @@ def c_min_of(alloc_top, alloc_sp, occ_top, occ_sp, field_min):
                 dists.append((m, occ))
         else:
             for m, f in zip(alloc, occ):
-                if m + f > 0:
-                    exact.append(float(m + f))
+                # occupancy may arrive as an EXPECTED count (fractional). c_min is a
+                # minimum over integer answer counts, so round before taking it --
+                # a raw 0.0001 would otherwise become the diversity numerator and
+                # collapse the whole term.
+                t = m + f
+                if t > 0.5:
+                    exact.append(max(1.0, float(round(t))))
     if field_min:
         exact.append(float(field_min))
 
@@ -303,6 +308,56 @@ def _best_widths(difficulty, omega, a, b, a_top, a_sp, occ_top, occ_sp,
     return best
 
 
+def _cmin_targets(occ_top, occ_sp, budget):
+    """Floors worth trying: c_min can only be raised to just above an existing count."""
+    seen = {1}
+    for occ in (occ_top, occ_sp):
+        for f in occ:
+            if 0.0 < f <= budget:
+                seen.add(int(f) + 1)
+    return sorted(t for t in seen if t <= budget + 1)
+
+
+def _greedy_at_floor(occ_top, occ_sp, a_top, a_sp, a, b, floor):
+    """Greedy on sum m/(m+f), constrained so every occupied clique reaches `floor`.
+
+    j_marginal only sees one factor of J: the other is c_min, a minimum over the
+    occupied cliques that our own placement can lift. Topping every clique the
+    field already holds up to `floor` first, then spending what is left greedily,
+    enumerates the allocations that greedy alone cannot reach.
+    """
+    out = []
+    for occ, units in ((occ_top, a_top), (occ_sp, a_sp)):
+        alloc = [0] * len(occ)
+        if not occ:
+            out.append(alloc)
+            continue
+        need = 0
+        for i, f in enumerate(occ):
+            if 0.0 < f < floor:
+                alloc[i] = int(floor - f)
+                need += alloc[i]
+        if need > units:
+            return None
+        # an untouched clique holding f>0 already sits at f; an empty one we take
+        # would sit at m, so below the floor it may only be used at full depth
+        allowed = [i for i, f in enumerate(occ)
+                   if f > 0.0 or alloc[i] > 0 or floor <= 1]
+        if not allowed:
+            allowed = list(range(len(occ)))
+        for _ in range(units - need):
+            best_i = allowed[0]
+            best_d = -1e18
+            for i in allowed:
+                d = j_marginal(alloc[i], occ[i], a, b)
+                if d > best_d:
+                    best_d = d
+                    best_i = i
+            alloc[best_i] += 1
+        out.append(alloc)
+    return out[0], out[1]
+
+
 def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
              their_cliques, cap_top, cap_sp, field_min=1.0):
     """Best (alloc_top, alloc_sp) under eval_J."""
@@ -315,20 +370,20 @@ def allocate(difficulty, omega, a, b, occ_top, occ_sp, f_top, f_sp,
                                    occ_top, occ_sp, f_top, f_sp, their_cliques,
                                    cap_top, cap_sp, field_min)
         else:
-            at = [0] * len(occ_top)
-            asp = [0] * len(occ_sp)
-            for target, occ, units in ((at, occ_top, a_top), (asp, occ_sp, a_sp)):
-                if not occ:
+            at, asp = None, None
+            best_inner = None
+            for floor in _cmin_targets(occ_top, occ_sp, a):
+                cand = _greedy_at_floor(occ_top, occ_sp, a_top, a_sp, a, b, floor)
+                if cand is None:
                     continue
-                for _ in range(units):
-                    best_i = 0
-                    best_d = -1e18
-                    for i, f in enumerate(occ):
-                        d = j_marginal(target[i], f, a, b)
-                        if d > best_d:
-                            best_d = d
-                            best_i = i
-                    target[best_i] += 1
+                v = eval_J(difficulty, omega, a, b, cand[0], cand[1],
+                           occ_top, occ_sp, f_top, f_sp, their_cliques, field_min)
+                if best_inner is None or v > best_inner:
+                    best_inner = v
+                    at, asp = cand
+            if at is None:
+                at = [0] * len(occ_top)
+                asp = [0] * len(occ_sp)
         j = eval_J(difficulty, omega, a, b, at, asp, occ_top, occ_sp,
                    f_top, f_sp, their_cliques, field_min)
         if best_j is None or j > best_j:

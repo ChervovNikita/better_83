@@ -67,8 +67,7 @@ def main():
     ORDER = args.order
     pick_derived.picker = picker
 
-    solver.configure(fleet_n=args.N, pool_cache=args.pool_cache,
-                     pool_k_mult=args.pool_k_mult)
+    solver.configure(fleet_n=args.N, pool_cache=args.pool_cache)
     with open(paths.METAGRAPH_JSON) as handle:
         meta = json.load(handle)
     victims = simulate.pick_victims(meta, args.N)
