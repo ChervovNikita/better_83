@@ -190,6 +190,46 @@ served before assuming something is broken.
 
 The dispatcher already batches siblings per round; nothing else changes.
 
+## A fresh pod, before anything else
+
+**Stop the OS from replacing the GPU driver under a running miner.** As root,
+on every new pod, before starting anything:
+
+    apt-mark hold 'nvidia-*' 'libnvidia-*'
+    systemctl disable --now apt-daily-upgrade.timer
+    nvidia-smi -pm 1                  # persistence: GPUs stay initialised
+
+MEASURED 2026-09-18: unattended-upgrades upgraded the NVIDIA userspace to
+580.178 under a running 580.95 kernel module (`nvidia-smi` broke immediately,
+CUDA survived), then 35 minutes later DELETED the running driver's GSP firmware
+(`/lib/firmware/nvidia/580.95.05/`). Every GPU then failed to initialise --
+`cuInit` returned CUDA_ERROR_UNKNOWN with no project code loaded -- and stayed
+dead until the firmware package was reinstalled. A container cannot reload the
+host's kernel module, so this is unrecoverable without root or a new pod.
+Persistence mode keeps the GPUs from re-initialising in the first place.
+
+Then bring the repo up:
+
+    git clone <this repo> && cd better_83
+    uv venv -p 3.12 .venv && uv pip install -p .venv/bin/python -r requirements.txt
+    uv pip install -p .venv/bin/python fastapi uvicorn tqdm pytest 'wandb<0.20'
+
+    # the two data files the picker and the simulator read (both gitignored)
+    .venv/bin/python research_manual/eda/dump_metagraph.py --live --netuid 83
+    .venv/bin/python research_manual/eda/dump_wandb.py      # needs WANDB_API_KEY
+
+    cp deploy/coldkeys.txt.example deploy/coldkeys.txt   # then edit
+    deploy/fleet_size.sh                                 # confirms SN83_FLEET_N
+    rm -f deploy/MINER_DISABLED                          # if this box should serve
+
+`start_dispatcher.sh` builds the native libraries on first run (nvcc ~17 s,
+g++ ~2 s), never inside a round.
+
+**One reachable port per hotkey.** Each hotkey is its own miner process with
+its own axon, and bittensor verifies the validator's signature against *that
+axon's* hotkey, so hotkeys cannot share a port. A NAT'd box forwarding 12 ports
+hosts 12 miners, not 150 -- check the port map before registering a fleet.
+
 ## Toolchain, for rebuilding this box
 
 No root was available, so nothing is installed system-wide:
@@ -218,3 +258,14 @@ Two known failures, both pre-existing and outside the production path:
   `test_thread_split_never_oversubscribes` calls `importlib.reload(dispatcher)`,
   which swaps the session fixture's *started* worker pool for an unstarted one.
   Test isolation, not the service.
+
+The unit tests do not exercise the axon, the HTTP hop, sibling batching under
+overlap, or the alert. `research_manual/eda/e2e/` does, on production code:
+
+    K=100 research_manual/eda/e2e/run_e2e.sh
+    .venv/bin/python research_manual/eda/e2e/e2e_analyze.py ../better_83_e2e/run1
+
+Both failures this audit found -- siblings exhausting the dispatcher's thread
+pool at fleet 100, and pickers starving the event loop at 150+ -- passed every
+unit test and `simulate.py`. Run it after any change to the dispatcher, the
+miner, or the picker, before deploying.
