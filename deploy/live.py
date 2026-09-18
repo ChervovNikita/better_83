@@ -56,6 +56,10 @@ KEYS = [
 ACTIVE_S = 2 * 3600        # a run silent this long is not polled
 REDISCOVER_S = 60          # how often to look for new validator runs
 MISSING_GIVE_UP_S = 180    # stop waiting for a skipped round after this
+# A validator posts a round every 1-2 minutes. Silence longer than this is the
+# validator (stalled, restarting, or no longer logging), and the status line
+# says so rather than leaving a quiet screen that looks like a hung tool.
+QUIET_MIN = 10
 
 
 # ------------------------------------------------------------------ rounds
@@ -162,7 +166,9 @@ class Source(object):
             if self.prefix and not hotkey.startswith(self.prefix):
                 continue
             last = float(r.summary.get("_timestamp") or 0)
-            if now - last > ACTIVE_S:
+            # keep a run we were already following even if it went quiet:
+            # dropping it would hide the moment it comes back
+            if now - last > ACTIVE_S and r.name not in self.runs:
                 continue
             found[r.name] = {
                 "validator": hotkey[:8],
@@ -231,7 +237,10 @@ def main():
 
     src = Source(api, args.validator)
     if not src.discover():
-        raise SystemExit("no validator run has logged in the last %d h" % (ACTIVE_S // 3600))
+        # wait rather than exit: the loop rediscovers every REDISCOVER_S, so a
+        # validator that comes back is picked up without restarting this
+        print("  [no validator run has logged in the last %d h -- waiting for one]"
+              % (ACTIVE_S // 3600), file=sys.stderr, flush=True)
     print("following %s  |  %d validator(s): %s  |  poll %.1fs" % (
         "ALL miners" if args.all else "hotkey " + args.hotkey,
         len(src.runs), ", ".join("%s (v%s)" % (v["validator"], v["version"]) for v in src.runs.values()),
@@ -240,6 +249,8 @@ def main():
     out_jsonl = open(args.jsonl, "a") if args.jsonl else None
     seen = collections.defaultdict(set)   # run -> steps already handled
     last = {}                             # run -> newest step known
+    newest_ts = {n: float(v["run"].summary.get("timestamp") or 0)
+                 for n, v in src.runs.items()}   # run -> its newest round's time
     missing = {}                          # (run, step) -> when first missed
     stats = {"rounds": 0, "ours": 0, "delays": []}
     if not args.all:
@@ -298,6 +309,22 @@ def main():
     if args.backfill and not args.all:
         print("-" * len(HOTKEY_HEAD) + "  live from here")
 
+    def freshness():
+        now = time.time()
+        parts = []
+        for n in sorted(src.runs):
+            ts = newest_ts.get(n, 0.0)
+            if not ts:
+                continue
+            age = (now - ts) / 60.0
+            parts.append("%s last posted %s UTC (%s)" % (
+                src.runs[n]["validator"],
+                dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%H:%M:%S"),
+                "%.0f min ago -- validator silent, not this tool" % age
+                if age >= QUIET_MIN else "%.0f min ago" % age))
+        return "; ".join(parts) or "no validator has posted recently"
+
+    print("  [%s]" % freshness(), file=sys.stderr, flush=True)
     if args.once:
         return
 
@@ -312,6 +339,8 @@ def main():
                 if s.get("_step") is None:
                     continue
                 step = int(s["_step"])
+                newest_ts[name] = max(newest_ts.get(name, 0.0),
+                                      float(s.get("timestamp") or 0))
                 top = last.get(name)
                 if top is None:                  # a validator run that just appeared
                     top = step - 1
@@ -340,13 +369,16 @@ def main():
         except Exception as exc:        # a flaky poll must not end a long watch
             print("  [poll failed: %s]" % str(exc)[:120], file=sys.stderr, flush=True)
             time.sleep(2.0)
-        if time.time() - last_status > 300:
+        quiet = all(time.time() - newest_ts.get(n, 0.0) > QUIET_MIN * 60
+                    for n in src.runs) if src.runs else True
+        if time.time() - last_status > (60 if quiet else 300):
             d = sorted(stats["delays"][-50:])
-            print("  [%s UTC: %d rounds seen%s%s]" % (
+            print("  [%s UTC: %d rounds seen%s%s | %s]" % (
                 dt.datetime.now(dt.timezone.utc).strftime("%H:%M:%S"),
                 stats["rounds"],
                 "" if args.all else ", %d queried this hotkey" % stats["ours"],
-                ", delay p50 %.1fs max %.1fs" % (d[len(d) // 2], d[-1]) if d else ""),
+                ", delay p50 %.1fs max %.1fs" % (d[len(d) // 2], d[-1]) if d else "",
+                freshness()),
                 file=sys.stderr, flush=True)
             last_status = time.time()
         time.sleep(max(0.0, args.poll - (time.time() - t0)))
