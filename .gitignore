@@ -187,3 +187,4 @@ research/native/variants/.*.lock
 # solver backup written by research/promote.sh
 research/native/clique.cpp.prev
 deploy/coldkeys.txt
+.venv-monitor/

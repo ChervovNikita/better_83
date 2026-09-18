@@ -181,6 +181,31 @@ validator only sees a newly registered hotkey after it resyncs its metagraph,
 and it samples a fraction of miners each round. Check the axon is actually
 served before assuming something is broken.
 
+## Live: every round as the validators post it
+
+    deploy/live.sh <hotkey-ss58>        one row per round that queried this hotkey
+    deploy/live_all.sh                  one block per round, one row per miner scored
+
+    time(UTC) validator  delay  round     n    tl   D    answered   size/best  div    opt    reward place   dup
+    11:18:16  5EHGayLm    50.7s  90b8515e  894  7.5  1.0  ok          31/31     1.000  1.000  3.000  1/18    1
+
+`answered` is `ok`, `INVALID` (answered, but the validator zeroed the clique) or
+`NO ANSWER` (empty -- timed out or never reached). `validator` is the posting
+validator's hotkey prefix. `--backfill N` shows the last N matching rounds
+first; `--jsonl FILE` keeps the raw rows; `-v` also lists rounds that did not
+query the hotkey.
+
+**Delay.** `delay` is measured from the validator's own timestamp, so it is the
+whole chain. MEASURED over 11 live rounds on 2026-09-18: validator -> relay ->
+W&B 0.8-5.3 s, then W&B takes a further 3-15 s before ANY client can read the
+round -- the summary, the full summary and the history API all saw each round
+within 0.5 s of one another. This tool polls every 0.5 s and adds under a
+second; about half of rounds land inside 10 s and the rest in 14-16 s. That is
+the floor of the W&B path, not a setting.
+
+Only validators that log to W&B appear -- one (5EHGayLm..., v0.0.17) on
+2026-09-18. It runs in `.venv-monitor`, like `monitor.sh`.
+
 ## Adding hotkeys later
 
 1. Register them under a coldkey listed in `deploy/coldkeys.txt`.
