@@ -183,10 +183,19 @@ served before assuming something is broken.
 
 ## Adding hotkeys later
 
-1. Register them.
-2. Raise `SN83_FLEET_N` in `sn83.env` to the new total.
-3. `WALLET_HOTKEY=miner2 AXON_PORT=8092 deploy/start_miner.sh` per hotkey.
-4. Re-run `deploy/start_dispatcher.sh` so it picks up the new `SN83_FLEET_N`.
+1. Register them under a coldkey listed in `deploy/coldkeys.txt`.
+2. `deploy/fleet_size.sh` -- confirms the count the picker will use. Nothing to
+   edit: `SN83_FLEET_N=auto` counts them from the metagraph snapshot.
+3. `deploy/start_fleet.sh` -- one miner per hotkey, each on its own forwarded
+   port. `DRY=1 deploy/start_fleet.sh` prints the port plan first.
+
+Hotkeys cannot share a port: bittensor verifies the validator's signature
+against the hotkey that axon serves, so a request for one hotkey arriving on
+another's port is rejected. The fleet is therefore capped by how many ports the
+host forwards. This box forwards internal 10-250; 22 (ssh) and 80 (taken) are
+reserved, and the launcher uses 100-249 by default (`FLEET_PORT_LO/HI`,
+`FLEET_RESERVED`). Publishing a port the host does not forward is silently
+fatal: `is_serving` reads true on chain and every round scores zero.
 
 The dispatcher already batches siblings per round; nothing else changes.
 
