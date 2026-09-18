@@ -16,6 +16,7 @@ exercises routing, admission, sibling batching and deadlines without a solver.
 """
 
 import os
+import queue
 import time
 
 
@@ -57,6 +58,8 @@ class Backend(object):
             probe[i][i] = 0
         with gpu_lib.GpuClique(probe, walkers=4) as gpu:
             info = gpu.info()
+        # the handle every round reuses: allocate it here, never in a request
+        fleet_solver_gpu.warm()
         return "gpu backend, THREADS=%s, %s" % (
             fleet_solver_gpu.fleet_solver.THREADS, info)
 
@@ -155,8 +158,18 @@ def worker_main(kind, device, threads, req_q, res_q, ready_q, cores=None):
     except Exception as exc:                      # a worker that cannot warm is
         ready_q.put(("error", repr(exc)))         # useless; the pool drops it
         return
+    parent = os.getppid()
     while True:
-        job = req_q.get()
+        try:
+            job = req_q.get(timeout=1.0)
+        except queue.Empty:
+            # The dispatcher died without shutting us down (crash, SIGKILL, a
+            # restart that only killed uvicorn). Measured: its workers lived on
+            # as orphans, each still holding a CUDA context and its pinned
+            # cores, next to the replacement dispatcher's own workers.
+            if os.getppid() != parent:
+                return
+            continue
         if job is None:
             return
         job_id, matrix, budget, k = job

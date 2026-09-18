@@ -31,10 +31,18 @@ _cache_lock = threading.Lock()
 _dump_lock = threading.Lock()
 
 
+# Seed for the within-level pool shuffle (pick_derived.shuffle_levels). Fixed
+# here so a simulator run is reproducible and paired comparisons hold; the
+# dispatcher keys the same shuffle with a secret instead. None = the old
+# vertex-id order, kept only to measure against.
+SHUFFLE_SEED = 0
+
+
 def configure(fleet_n, pool_cache="", pool_dump="", picker="blind", minimax_n=None,
-              harvest_cap_s=None, solve_budget_s=None):
+              harvest_cap_s=None, solve_budget_s=None, shuffle_seed=0):
     global FLEET_N, POOL_CACHE, POOL_DUMP, PICKER, MINIMAX_N, HARVEST_CAP_S
-    global SOLVE_BUDGET_S, _cache
+    global SOLVE_BUDGET_S, SHUFFLE_SEED, _cache
+    SHUFFLE_SEED = None if shuffle_seed is None else int(shuffle_seed)
     HARVEST_CAP_S = None if harvest_cap_s is None else float(harvest_cap_s)
     SOLVE_BUDGET_S = None if solve_budget_s is None else float(solve_budget_s)
     MINIMAX_N = None if minimax_n is None else int(minimax_n)
@@ -192,6 +200,11 @@ def solve(hotkeys, adjacency_matrix, time_limit, uuid):
         if POOL_CACHE:
             _cache_put(uuid, want, pool, stats)
 
+    if SHUFFLE_SEED is not None:
+        pool, shuffled_hits = pick_derived.shuffle_levels(
+            pool, stats.get("hits", []),
+            ("sim|%d|%s" % (SHUFFLE_SEED, uuid)).encode())
+        stats = dict(stats, hits=shuffled_hits)
     fn = _PICKERS[effective_picker()]
     kw = {}
     if _PICKERS_NEED_DEADLINE.get(effective_picker()):

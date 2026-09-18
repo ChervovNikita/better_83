@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import random
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -70,11 +71,56 @@ def infer_fleet_n(q, difficulty):
     return int(round(q / selection_p(difficulty)))
 
 
+def p_at_most_queried(k, fleet_n, difficulty):
+    n = int(fleet_n)
+    if n <= 0:
+        return 1.0
+    k = int(k)
+    if k < 0:
+        return 0.0
+    if k >= n:
+        return 1.0
+    p = selection_p(difficulty)
+    if p <= 0.0:
+        return 1.0
+    if p >= 1.0:
+        return 0.0
+    q = 1.0 - p
+    term = q ** n
+    total = term
+    for i in range(1, k + 1):
+        term *= (n - i + 1) / float(i) * (p / q)
+        total += term
+    return min(1.0, max(0.0, total))
+
+
+_meta_lock = threading.RLock()
+
+
 def _load_metagraph():
-    if "meta" not in _profile_cache:
-        with open(METAGRAPH) as handle:
-            _profile_cache["meta"] = json.load(handle)
-    return _profile_cache["meta"]
+    """The snapshot, re-read whenever the file behind METAGRAPH changes.
+
+    The dispatcher is long-lived and refresh_metagraph.sh rewrites this file
+    hourly. Caching it for the life of the process meant the picker kept
+    modelling the field as it was at startup however fresh the file was -- the
+    stale-field failure the refresh exists to prevent. A change of path or
+    mtime drops every derived cache with it. The dumper writes through
+    os.replace, so a stat never sees half a file.
+    """
+    with _meta_lock:
+        try:
+            stamp = (METAGRAPH, os.stat(METAGRAPH).st_mtime_ns)
+        except OSError:
+            stamp = None
+        if "meta" not in _profile_cache or (
+                stamp is not None and _profile_cache.get("meta_stamp") != stamp):
+            with open(METAGRAPH) as handle:
+                meta = json.load(handle)
+            _profile_cache.clear()
+            _victim_cache.clear()
+            _profile_cache["meta"] = meta
+            _profile_cache["meta_stamp"] = stamp
+        return _profile_cache["meta"]
 
 
 def _operator_of(coldkey):
@@ -91,28 +137,95 @@ def _churn_order(meta):
             if block - m["block_at_registration"] >= IMMUNITY_BLOCKS]
 
 
+# Our coldkeys, one ss58 per line ('#' comments allowed), set in production via
+# SN83_COLDKEYS_FILE. Empty means "not configured": the field model then falls
+# back to displacing the fleet_n weakest miners, which is what a replay of
+# history needs because our hotkeys are not in that metagraph.
+COLDKEYS_FILE = os.environ.get("SN83_COLDKEYS_FILE", "")
+_coldkey_cache = {}
+
+
+def our_coldkeys():
+    """The configured coldkeys, re-read whenever the file changes."""
+    path = COLDKEYS_FILE
+    if not path:
+        return frozenset()
+    try:
+        stamp = (path, os.stat(path).st_mtime_ns)
+    except OSError:
+        return frozenset()
+    if _coldkey_cache.get("stamp") != stamp:
+        keys = set()
+        with open(path) as handle:
+            for line in handle:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    keys.add(line)
+        _coldkey_cache["stamp"] = stamp
+        _coldkey_cache["keys"] = frozenset(keys)
+    return _coldkey_cache["keys"]
+
+
+def our_hotkeys_live():
+    """Hotkeys in the current snapshot registered under our coldkeys."""
+    ours = our_coldkeys()
+    if not ours:
+        return frozenset()
+    meta = _load_metagraph()
+    return frozenset(m["hotkey"] for m in meta["miners"] if m["coldkey"] in ours)
+
+
+def fleet_n_auto():
+    """Our registered hotkey count, from the snapshot and the coldkeys file."""
+    return len(our_hotkeys_live())
+
+
+def resolve_fleet_n(value=None):
+    """SN83_FLEET_N: an integer pins it (simulation, tests); 'auto' or unset
+    counts our coldkeys' hotkeys in the current metagraph snapshot, so the fleet
+    size follows registrations without anyone editing a number. Never below 1.
+    """
+    raw = os.environ.get("SN83_FLEET_N", "auto") if value is None else value
+    raw = str(raw).strip().lower()
+    if raw and raw != "auto":
+        return max(1, int(raw))
+    return max(1, fleet_n_auto())
+
+
 def victim_hotkeys(fleet_n):
-    """The hotkeys our fleet_n registrations displace."""
+    """The hotkeys our registrations take out of the rival field.
+
+    Live (our coldkeys configured and present in the snapshot): our own
+    hotkeys -- the miners they displaced are already gone from the metagraph,
+    so displacing fleet_n more would count our registrations twice and keep us
+    in the field as rivals. Replay: the fleet_n weakest non-immune miners.
+    """
     key = int(fleet_n)
-    if key not in _victim_cache:
-        cand = _churn_order(_load_metagraph())
-        _victim_cache[key] = {m["hotkey"] for m in cand[:max(0, key)]}
-    return _victim_cache[key]
+    with _meta_lock:
+        meta = _load_metagraph()
+        live = our_hotkeys_live()
+        if live:
+            return set(live)
+        if key not in _victim_cache:
+            cand = _churn_order(meta)
+            _victim_cache[key] = {m["hotkey"] for m in cand[:max(0, key)]}
+        return _victim_cache[key]
 
 
 def fleet_profile(fleet_n):
     """Rival hotkey counts per operator, after our registrations displace theirs."""
-    key = int(fleet_n)
-    if key in _profile_cache:
-        return _profile_cache[key]
-    meta = _load_metagraph()
-    taken = victim_hotkeys(key)
-    counts = collections.Counter()
-    for m in meta["miners"]:
-        if m["hotkey"] not in taken:
-            counts[_operator_of(m["coldkey"])] += 1
-    _profile_cache[key] = counts
-    return counts
+    key = (int(fleet_n), our_coldkeys())
+    with _meta_lock:
+        meta = _load_metagraph()
+        if key in _profile_cache:
+            return _profile_cache[key]
+        taken = victim_hotkeys(key[0])
+        counts = collections.Counter()
+        for m in meta["miners"]:
+            if m["hotkey"] not in taken:
+                counts[_operator_of(m["coldkey"])] += 1
+        _profile_cache[key] = counts
+        return counts
 
 
 def operator_reach(name, supply):
@@ -404,6 +517,32 @@ def _emit(uuid, hotkeys, top, spare, alloc_top, alloc_sp):
         slots.append((2, 99, list(pool[len(slots) % len(pool)])))
     offset = int(hashlib.sha1(str(uuid).encode()).hexdigest()[:8], 16)
     return [list(slots[(i + offset) % len(slots)][2]) for i in range(len(hotkeys))]
+
+
+def shuffle_levels(pool, hits, key):
+    """Random order within each clique size, keyed; returns (pool, hits).
+
+    Both pickers decide only HOW MANY cliques to use and how many hotkeys go on
+    each -- every clique at a level is modelled with the same rival load -- and
+    then take them from the front of the pool. The pool used to arrive sorted by
+    vertex id, so the fleet always answered with the lowest-numbered cliques it
+    held: a rule any rival holding the same cliques can reproduce. Shuffling
+    each level keeps the allocation exactly as chosen and makes WHICH cliques
+    fill it unpredictable. `hits` stays aligned with `pool`; levels keep their
+    relative order.
+    """
+    rng = random.Random(hashlib.sha256(key).digest())
+    hits = list(hits or [])
+    rows = list(zip(pool, hits + [0] * (len(pool) - len(hits))))
+    by_size = collections.OrderedDict()
+    for row in rows:
+        by_size.setdefault(len(row[0]), []).append(row)
+    out = []
+    for size in sorted(by_size, reverse=True):
+        level = by_size[size]
+        rng.shuffle(level)
+        out.extend(level)
+    return [list(c) for c, _ in out], ([h for _, h in out] if hits else [])
 
 
 def _levels(pool):

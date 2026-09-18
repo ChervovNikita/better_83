@@ -1,0 +1,4 @@
+# One coldkey ss58 address per line. Every hotkey registered on netuid 83 under
+# these coldkeys counts toward our fleet size (SN83_FLEET_N=auto).
+# Copy to deploy/coldkeys.txt and edit.
+# 5Exxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

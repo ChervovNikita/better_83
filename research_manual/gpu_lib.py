@@ -69,6 +69,10 @@ def _bind(lib):
     u64 = c.c_uint64
     lib.sn83_gpu_open.restype = c.c_void_p
     lib.sn83_gpu_open.argtypes = [c.POINTER(c.c_uint8), c.c_int, c.c_int]
+    lib.sn83_gpu_open_cap.restype = c.c_void_p
+    lib.sn83_gpu_open_cap.argtypes = [c.POINTER(c.c_uint8), c.c_int, c.c_int, c.c_int]
+    lib.sn83_gpu_load.restype = c.c_int
+    lib.sn83_gpu_load.argtypes = [c.c_void_p, c.POINTER(c.c_uint8), c.c_int]
     lib.sn83_gpu_close.restype = None
     lib.sn83_gpu_close.argtypes = [c.c_void_p]
     lib.sn83_gpu_walkers.restype = c.c_int
@@ -119,6 +123,61 @@ def verify(A, clique):
     return True, not bool(np.any((cnt == m) & ~in_c))
 
 
+def verify_many(A, cliques, chunk=2048):
+    """verify() for many cliques at once: one bool per clique, is_clique AND
+    maximal -- the same verdict as `all(verify(A, c))`, element for element.
+
+    The per-clique form costs ~0.15 ms of numpy overhead each, which is 0.4 s on
+    a round whose closure holds 2,600 omega-cliques. Here adjacency is packed
+    into 64-bit words and each size group is checked in chunks:
+
+      clique   popcount(row(v) & members) summed over members == s*(s-1), with a
+               zero diagonal on every member (so no self bit can stand in for a
+               missing edge)
+      maximal  AND of the member rows has no bit set, i.e. no vertex outside the
+               clique is adjacent to all of it (members are excluded by the zero
+               diagonal)
+    """
+    A = np.ascontiguousarray(A, dtype=np.uint8)
+    n = A.shape[0]
+    out = np.zeros(len(cliques), dtype=bool)
+    if not len(cliques):
+        return out
+    words = (n + 63) // 64
+    packed = np.packbits(A, axis=1, bitorder="little")
+    pad = np.zeros((n, words * 8), dtype=np.uint8)
+    pad[:, :packed.shape[1]] = packed
+    rows = pad.view(np.uint64)                              # n x words
+    onehot = np.zeros((n, words * 8), dtype=np.uint8)
+    onehot[np.arange(n), np.arange(n) // 8] = (1 << (np.arange(n) % 8)).astype(np.uint8)
+    onehot = onehot.view(np.uint64)
+    diag = np.diagonal(A).astype(bool)
+
+    by_size = {}
+    for i, c in enumerate(cliques):
+        by_size.setdefault(len(c), []).append(i)
+    for s, members in by_size.items():
+        if s == 0:
+            continue
+        for lo in range(0, len(members), chunk):
+            ids = members[lo:lo + chunk]
+            idx = np.asarray([list(cliques[i]) for i in ids], dtype=np.int64)
+            ok = (idx.min(axis=1) >= 0) & (idx.max(axis=1) < n)
+            safe = np.where(ok[:, None], idx, 0)
+            srt = np.sort(safe, axis=1)
+            ok &= (np.diff(srt, axis=1) > 0).all(axis=1) if s > 1 else True
+            ok &= ~diag[safe].any(axis=1)
+            r = rows[safe]                                  # m x s x words
+            mask = np.bitwise_or.reduce(onehot[safe], axis=1)
+            pairs = np.bitwise_count(r & mask[:, None, :]).sum(axis=(1, 2),
+                                                               dtype=np.int64)
+            ok &= pairs == s * (s - 1)
+            common = np.bitwise_and.reduce(r, axis=1)
+            ok &= ~(common & ~mask).any(axis=1)
+            out[np.asarray(ids)] = ok
+    return out
+
+
 def stall(counters):
     """Duplicate fraction among omega-sized results, the design's §6 detector.
 
@@ -132,7 +191,10 @@ def stall(counters):
 class GpuClique(object):
     """One graph resident on the device, many searches over it."""
 
-    def __init__(self, adjacency_matrix, lanes=32, prefix=False, walkers=0):
+    def __init__(self, adjacency_matrix, lanes=32, prefix=False, walkers=0,
+                 capacity=0):
+        """capacity > n sizes the device buffers for later load() calls of up to
+        that many vertices, so one handle can serve every round."""
         self.lib = load(lanes, prefix)
         self.lanes = lanes
         self.prefix = bool(prefix)
@@ -140,15 +202,30 @@ class GpuClique(object):
         assert A.ndim == 2 and A.shape[0] == A.shape[1], A.shape
         self.n = int(A.shape[0])
         self._A = A
-        self.h = self.lib.sn83_gpu_open(
-            A.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), self.n, int(walkers))
-        assert self.h, "sn83_gpu_open: " + self.last_error()
+        self.capacity = max(int(capacity), self.n)
+        self.h = self.lib.sn83_gpu_open_cap(
+            A.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), self.n,
+            self.capacity, int(walkers))
+        assert self.h, "sn83_gpu_open_cap: " + self.last_error()
         cfg = [ctypes.c_int(0) for _ in range(6)]
         self.lib.sn83_gpu_config(*[ctypes.byref(x) for x in cfg])
         self.kmax = int(cfg[2].value)
         self.maxn = int(cfg[3].value)
         self.n_ctr = int(cfg[5].value)
         self.walkers = int(self.lib.sn83_gpu_walkers(self.h))
+
+    def load(self, adjacency_matrix):
+        """Swap a new graph into this handle: an upload, no device allocation."""
+        A = np.ascontiguousarray(adjacency_matrix, dtype=np.uint8)
+        assert A.ndim == 2 and A.shape[0] == A.shape[1], A.shape
+        n = int(A.shape[0])
+        assert n <= self.capacity, "n=%d exceeds capacity %d" % (n, self.capacity)
+        got = self.lib.sn83_gpu_load(
+            self.h, A.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), n)
+        assert got == 0, "sn83_gpu_load: " + self.last_error()
+        self.n = n
+        self._A = A
+        return self
 
     def close(self):
         if getattr(self, "h", None):

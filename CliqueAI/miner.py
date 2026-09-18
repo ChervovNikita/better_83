@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import threading
 import time
 import typing
 
@@ -9,9 +10,6 @@ from CliqueAI.graph.codec import GraphCodec
 from CliqueAI.protocol import MaximumCliqueOfLambdaGraph
 from common.base.miner import BaseMinerNeuron
 
-# The solver lives in research_manual/, located relative to this file so a
-# deployment that ships CliqueAI/ without research_manual/ fails at import --
-# loudly, at startup -- rather than answering empty cliques for a whole epoch.
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _p in (os.path.join(_REPO, "research_manual"),
            os.path.join(_REPO, "research_manual", "eda")):
@@ -20,55 +18,27 @@ for _p in (os.path.join(_REPO, "research_manual"),
 
 import dispatch_client  # noqa: E402
 import fleet_solver  # noqa: E402  (builds libclique.so at import, never in a request)
+import pick_derived  # noqa: E402
 
-# Round-trip to the validator, plus the axon's own serialization. The dispatcher
-# subtracts the same figure again from what it is told; this one keeps the
-# miner's local fallback from starting a solve it cannot finish in time.
 LATENCY_S = float(os.environ.get("SN83_MINER_LATENCY_S", "2.0"))
-
-# The dispatcher subtracts its own LATENCY_S from whatever time_limit it is
-# given. Kept in step with SN83_LATENCY_S so the miner can work backwards from
-# the answer time it actually wants.
 DISPATCH_LATENCY_S = float(os.environ.get("SN83_LATENCY_S", "2.0"))
-
-# Never hold the validator's connection longer than this, whatever the deadline
-# allows. MEASURED: at tl=30 we answered at 27.0-27.5s and the validator
-# recorded nothing on 3 of 4 such rounds -- including cliques of 44 and 76 that
-# MATCHED the field's best. The same stack scores reliably at tl=10 and tl=15,
-# where the connection is held 7.5s and 12.5s. Something between us and the
-# validator does not keep a request alive for ~27s, so the extra harvest time is
-# not just wasted, it is destructive.
-#
-# Time-to-omega is under 10% of budget on every round measured, so capping the
-# hold costs pool breadth (fewer distinct cliques for the picker), not the
-# clique itself. A narrower pool scores; a late answer scores zero.
+SOLVE_CAP_S = float(os.environ.get("SN83_SOLVE_CAP_S", "2.0"))
+# Slack between the dispatcher's solve budget and how long we wait for it. Both
+# used to be exactly `budget`, so an answer the dispatcher finished at 2.01 s
+# was thrown away for a greedy local clique. Measured at fleet 160: 84 of 3,501
+# answers lost that way on realistic traffic. The round's split is 2 s network
+# + 2 s solve + < 1 s for everything else, and this spends part of the last.
+DISPATCH_GRACE_S = float(os.environ.get("SN83_HTTP_GRACE_S", "0.5"))
 MAX_HOLD_S = float(os.environ.get("SN83_MAX_HOLD_S", "18.0"))
 
-# Reserve for the round trip, as a fraction of the deadline, floored at
-# LATENCY_S. A flat 2s left only ~2.5s of margin at every deadline, which is
-# proportionally far tighter at tl=30 than at tl=7.5.
-#
-# Raised 0.15 -> 0.25 on 2026-09-09 after two MEASURED losses where the answer
-# was correct and simply did not complete the round trip:
-#
-#   tl=10  hold 8.0s   answered 7.63s (margin 2.37s)  size 82 = field best -> []
-#   tl=15  hold 12.8s  answered 12.25s (margin 2.75s) size 25 = field best -> []
-#
-# The floor stays at 2.0s, so tl=6 and tl=7.5 are UNCHANGED -- neither has lost
-# a round, and cutting their hold would trade solve time for margin they do not
-# need. Only tl=10 (+0.5s) and tl=15 (+1.5s) move; tl=30 is already bounded by
-# MAX_HOLD_S. The cost is harvest breadth, not clique size: time-to-omega is
-# under 10% of budget, so a shorter hold narrows the pool the picker chooses
-# from rather than lowering the clique we find.
+RARE_QUERY_P = 0.05
+RARE_QUERY_MIN_TL_S = 10.0
+GATHER_FINISH_MAX_S = float(os.environ.get("SN83_GATHER_FINISH_MAX_S", "5.0"))
+GATHER_POLL_S = 0.05
+
+
 LATENCY_FRAC = float(os.environ.get("SN83_LATENCY_FRAC", "0.25"))
-
-# Fraction of the remaining budget the local fallback may spend. The rest is
-# margin: a late answer scores zero on both reward terms, so a smaller clique
-# delivered on time strictly dominates a better one delivered late.
 FALLBACK_SHARE = 0.8
-
-# Below this there is no time to run the native core at all, so the fallback
-# degrades to a greedy maximal clique, which costs microseconds.
 FALLBACK_MIN_S = 0.5
 
 DEFAULT_TIMEOUT_S = 15.0
@@ -99,27 +69,23 @@ class Miner(BaseMinerNeuron):
         started = time.monotonic()
         timeout = float(getattr(synapse, "timeout", None) or DEFAULT_TIMEOUT_S)
         reserve = max(LATENCY_S, LATENCY_FRAC * timeout)
-        # `budget` is when WE intend to answer; `hold` additionally caps how long
-        # the connection is held open regardless of how generous the deadline is.
-        budget = min(timeout - reserve, MAX_HOLD_S)
+        budget = min(timeout - reserve, MAX_HOLD_S, SOLVE_CAP_S)
         hotkey = self.wallet.hotkey.ss58_address
 
         clique = None
+        role = None
         if budget > 0:
-            # The HTTP deadline is `budget`, not `timeout`: a dispatcher that
-            # hangs must not consume the margin the local fallback needs.
-            clique = await asyncio.to_thread(
-                dispatch_client.solve,
+            clique, role = await dispatch_client.solve_source_async(
                 synapse.uuid,
                 hotkey,
                 synapse.number_of_nodes,
                 None,
                 budget + DISPATCH_LATENCY_S,
                 encoded_matrix=synapse.encoded_matrix,
-                timeout=budget,
+                timeout=budget + DISPATCH_GRACE_S,
             )
 
-        source = "dispatcher"
+        source = role or "dispatcher"
         if not clique:
             source = "local"
             bt.logging.warning("Dispatcher gave no answer; solving locally")
@@ -135,7 +101,56 @@ class Miner(BaseMinerNeuron):
             f"size={len(synapse.maximum_clique)} "
             f"elapsed={time.monotonic() - started:.2f}s"
         )
+        if timeout >= RARE_QUERY_MIN_TL_S and role == "owner":
+            threading.Thread(
+                target=self._gather_watch,
+                args=(synapse.uuid, synapse.number_of_nodes,
+                      timeout, synapse.encoded_matrix),
+                daemon=True,
+            ).start()
         return synapse
+
+    def _gather_watch(self, uuid, n_nodes, time_limit, encoded_matrix):
+        try:
+            claims = self._started_count(uuid)
+            if not self._wait_until_finished(uuid, claims):
+                return
+            difficulty = pick_derived.difficulty_from_n(n_nodes)
+            p_sel = pick_derived.selection_p(difficulty)
+            fleet = pick_derived.resolve_fleet_n()
+            p_tail = pick_derived.p_at_most_queried(claims, fleet, difficulty)
+            if time_limit < RARE_QUERY_MIN_TL_S or p_tail >= RARE_QUERY_P:
+                return
+            bt.logging.warning(
+                f"RARE QUERY uuid={uuid} claims={claims}/{fleet} "
+                f"p={p_sel:.3f} P(X<=k)={p_tail:.4f} "
+                f"D={difficulty} tl={time_limit:.1f}s"
+            )
+            self._cpu_followup(
+                encoded_matrix, uuid, n_nodes, time_limit, claims)
+        except Exception:
+            bt.logging.error("Gather watch failed", exc_info=True)
+
+    def _started_count(self, uuid):
+        n = dispatch_client.started_waiting(uuid)
+        return n if n else 1
+
+    def _wait_until_finished(self, uuid, claims):
+        """Block until every miner in the snapshot has left /solve."""
+        deadline = time.monotonic() + GATHER_FINISH_MAX_S
+        while time.monotonic() < deadline:
+            info = dispatch_client.task_progress(uuid)
+            if info is not None and info["finished"] >= claims:
+                return True
+            time.sleep(GATHER_POLL_S)
+        bt.logging.warning(
+            f"gather: {claims} started on {uuid} but not all finished"
+        )
+        return False
+
+    def _cpu_followup(self, encoded_matrix, uuid, n_nodes, time_limit, claims):
+        bt.logging.info(f"low probability event")
+        return []
 
     def _solve_locally(self, encoded_matrix, seconds_left):
         """Error handling, not a mode -- nothing selects this path.

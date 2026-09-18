@@ -45,6 +45,12 @@ DEBUG = os.environ.get("SN83_GPU_DEBUG", "0") == "1"
 
 MAXN = None
 _last_stats = {}
+# One device handle per process, opened at capacity MAXN and reloaded with each
+# round's graph. Opening and closing per round put ~20 device allocations, a
+# stream create and a pinned host allocation on the answer path, and those
+# stalled 0.4-3.6 s on a few percent of rounds regardless of how long the card
+# had been idle.
+_handle = None
 
 
 def _init_gpu():
@@ -60,6 +66,25 @@ def _init_gpu():
 
 
 _init_gpu()
+
+
+def gpu_handle(A):
+    """The process's handle with `A` loaded, opened on first use."""
+    global _handle
+    import gpu_lib
+    if _handle is None:
+        _handle = gpu_lib.GpuClique(A, lanes=LANES, prefix=PREFIX_ARM,
+                                    capacity=MAXN)
+    else:
+        _handle.load(A)
+    return _handle
+
+
+def warm():
+    """Open the persistent handle now, outside any round."""
+    probe = np.ones((8, 8), dtype=np.uint8)
+    np.fill_diagonal(probe, 0)
+    return gpu_handle(probe)
 
 
 def last_stats():
@@ -187,9 +212,18 @@ def solve_many(adjacency_matrix, time_limit, k):
         assert champion
         champion = sorted(int(v) for v in champion)
 
-    with gpu_lib.GpuClique(A, lanes=LANES, prefix=PREFIX_ARM) as gpu:
-        left = deadline - time.monotonic()
-        assert left > 0.05, "%.3fs left of a %.3fs budget" % (left, time_limit)
+    gpu = gpu_handle(A)
+    left = deadline - time.monotonic()
+    degraded = left <= 0.05
+    if degraded:
+        # No time left for a harvest. Answer from the CPU champion rather than
+        # raising: an error here left every hotkey in the round to a greedy
+        # fallback clique, while the champion is already a maximal clique at
+        # (or near) omega.
+        assert champion, "%.3fs left of a %.3fs budget and no champion" % (
+            left, time_limit)
+        pool, counters, hits = [], {}, []
+    else:
         pool, counters, hits = gpu.harvest(
             time_limit=left,
             seed=1,
@@ -205,7 +239,7 @@ def solve_many(adjacency_matrix, time_limit, k):
         pool.append(champion)
     _closure_added = 0
     _closure_iters = 0
-    if CLOSURE:
+    if CLOSURE and not degraded:
         omega_now = max(len(c) for c in pool)
         top_now = {tuple(sorted(c)) for c in pool if len(c) == omega_now}
         if not CLOSURE_MAX or len(top_now) <= CLOSURE_MAX:
@@ -216,17 +250,23 @@ def solve_many(adjacency_matrix, time_limit, k):
             _closure_added = len(added)
     pool.sort(key=len, reverse=True)
 
+    # Verify every distinct clique in one vectorized pass. Checking them one
+    # call at a time cost 0.4 s on rounds whose closure held ~2,600
+    # omega-cliques -- enough to push the whole solve past 2 s. The selection
+    # below is unchanged: an invalid clique is skipped wherever it sits, and
+    # verdicts do not depend on order, so the output is identical.
+    keys = list(dict.fromkeys(tuple(sorted(c)) for c in pool))
+    valid = dict(zip(keys, gpu_lib.verify_many(A, keys)))
+
     seen = set()
     out = []
     spare = []
-    for clique in pool:
+    for key in keys:
         if len(out) >= k and len(spare) >= k:
             break
-        key = tuple(sorted(clique))
         if key in seen:
             continue
-        is_clique, maximal = gpu_lib.verify(A, key)
-        if not (is_clique and maximal):
+        if not valid[key]:
             continue
         seen.add(key)
         if not out or len(key) == len(out[0]):
@@ -248,6 +288,7 @@ def solve_many(adjacency_matrix, time_limit, k):
 
     global _last_stats
     _last_stats = dict(counters)
+    _last_stats["degraded"] = bool(degraded)
     _last_stats["stall"] = gpu_lib.stall(counters)
     _last_stats["pool"] = len(pool)
     _last_stats["distinct_max"] = len(out)
@@ -267,7 +308,7 @@ def solve_many(adjacency_matrix, time_limit, k):
         _last_stats["full_hits"] = [hit_of.get(c, 0) for c in ranked]
     if DEBUG:
         sys.stderr.write("gpu: omega=%d distinct=%d spares=%d jobs=%d stall=%.2f\n"
-                         % (target, len(out), len(spare), counters["jobs"],
+                         % (target, len(out), len(spare), counters.get("jobs", 0),
                             _last_stats["stall"]))
 
     return out + spare

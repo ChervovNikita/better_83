@@ -1625,6 +1625,7 @@ char g_err[512] = {0};
 
 struct Handle {
     int n = 0, W = 0, n_pad = 0;
+    int cap_n = 0;           // device graph buffers are sized for this many vertices
     u64 tail = 0;
     std::vector<u64> hbits;
     std::vector<int> hdeg;
@@ -1791,13 +1792,8 @@ int sn83_gpu_device_info(char *buf, int len) {
     return 0;
 }
 
-void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
-    g_err[0] = 0;
-    if (n <= 0 || n > SN83_MAXN) {
-        snprintf(g_err, sizeof(g_err), "n=%d out of range (1..%d)", n, SN83_MAXN);
-        return nullptr;
-    }
-    Handle *h = new Handle();
+// Host-side graph for `n` vertices: bitsets, degrees and the reference mirror.
+static void host_graph(Handle *h, const unsigned char *adj, int n) {
     h->n = n;
     h->W = (n + 63) / 64;
     h->n_pad = ((n + 31) / 32) * 32;
@@ -1822,6 +1818,55 @@ void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
     h->rg.tail = h->tail;
     h->rg.bits = h->hbits;
     h->rg.deg = h->hdeg;
+}
+
+void *sn83_gpu_open_cap(const unsigned char *adj, int n, int max_n, int walkers_hint);
+
+void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
+    return sn83_gpu_open_cap(adj, n, n, walkers_hint);
+}
+
+// Swap a new graph into an open handle. No device allocation, no stream: only
+// the adjacency upload. Harvest re-initialises every other buffer it reads, so
+// a handle opened once per worker serves every round. Measured with an
+// open/close per round: 0.4-3.6 s stalls inside the allocation on a few
+// percent of rounds, long enough to miss the 2 s answer deadline outright.
+int sn83_gpu_load(void *hv, const unsigned char *adj, int n) {
+    g_err[0] = 0;
+    Handle *h = (Handle *)hv;
+    if (!h) {
+        snprintf(g_err, sizeof(g_err), "null handle");
+        return -1;
+    }
+    if (n <= 0 || n > h->cap_n) {
+        snprintf(g_err, sizeof(g_err), "n=%d exceeds handle capacity %d", n, h->cap_n);
+        return -1;
+    }
+    host_graph(h, adj, n);
+    cudaError_t e;
+    if ((e = cudaMemcpy(h->d_bits, h->hbits.data(), h->hbits.size() * sizeof(u64),
+                        cudaMemcpyHostToDevice)) != cudaSuccess ||
+        (e = cudaMemcpy(h->d_deg, h->hdeg.data(), (size_t)n * sizeof(int),
+                        cudaMemcpyHostToDevice)) != cudaSuccess) {
+        snprintf(g_err, sizeof(g_err), "load upload: %s", cudaGetErrorString(e));
+        return -1;
+    }
+    return 0;
+}
+
+void *sn83_gpu_open_cap(const unsigned char *adj, int n, int max_n, int walkers_hint) {
+    g_err[0] = 0;
+    if (max_n < n) max_n = n;
+    if (n <= 0 || max_n > SN83_MAXN) {
+        snprintf(g_err, sizeof(g_err), "n=%d/max_n=%d out of range (1..%d)", n, max_n,
+                 SN83_MAXN);
+        return nullptr;
+    }
+    Handle *h = new Handle();
+    h->cap_n = max_n;
+    host_graph(h, adj, n);
+    const size_t cap_W = (size_t)((max_n + 63) / 64);
+    const size_t cap_pad = (size_t)(((max_n + 31) / 32) * 32);
 
     cudaError_t e;
     auto fail = [&](const char *what) -> void * {
@@ -1834,9 +1879,9 @@ void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
         return fail("cudaSetDeviceFlags");
     e = cudaSuccess;
     if ((e = cudaStreamCreate(&h->stream)) != cudaSuccess) return fail("cudaStreamCreate");
-    if ((e = cudaMalloc(&h->d_bits, h->hbits.size() * sizeof(u64))) != cudaSuccess)
+    if ((e = cudaMalloc(&h->d_bits, (size_t)max_n * cap_W * sizeof(u64))) != cudaSuccess)
         return fail("cudaMalloc bits");
-    if ((e = cudaMalloc(&h->d_deg, (size_t)n * sizeof(int))) != cudaSuccess)
+    if ((e = cudaMalloc(&h->d_deg, (size_t)max_n * sizeof(int))) != cudaSuccess)
         return fail("cudaMalloc deg");
     cudaMemcpy(h->d_bits, h->hbits.data(), h->hbits.size() * sizeof(u64),
                cudaMemcpyHostToDevice);
@@ -1851,7 +1896,7 @@ void *sn83_gpu_open(const unsigned char *adj, int n, int walkers_hint) {
     h->n_blocks = blocks;
     h->n_walkers = blocks * SN83_WPB;
 
-    if ((e = cudaMalloc(&h->d_age, (size_t)h->n_walkers * h->n_pad * sizeof(int))) !=
+    if ((e = cudaMalloc(&h->d_age, (size_t)h->n_walkers * cap_pad * sizeof(int))) !=
         cudaSuccess)
         return fail("cudaMalloc age");
     if ((e = cudaMalloc(&h->d_bestv,

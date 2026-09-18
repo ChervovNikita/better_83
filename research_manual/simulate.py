@@ -353,6 +353,11 @@ def main():
                         help="hard ceiling on the harvest, every round")
     parser.add_argument("--minimax-n", type=int, default=None,
                         help="fleet size at/above which maximin replaces the derived picker")
+    parser.add_argument("--shuffle-seed", type=int, default=0,
+                        help="seed of the within-level pool shuffle (production "
+                             "uses a secret one)")
+    parser.add_argument("--no-shuffle", action="store_true",
+                        help="the old vertex-id pool order, for comparison")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     assert args.N > 0
@@ -374,9 +379,11 @@ def main():
                      pool_dump=args.pool_dump, picker=args.picker,
                      minimax_n=args.minimax_n,
                      harvest_cap_s=args.harvest_cap_s,
-                     solve_budget_s=args.solve_budget_s)
-    print("picker\t%s\tminimax_n\t%s\teffective\t%s"
-          % (args.picker, args.minimax_n, solver.effective_picker()))
+                     solve_budget_s=args.solve_budget_s,
+                     shuffle_seed=None if args.no_shuffle else args.shuffle_seed)
+    print("picker\t%s\tminimax_n\t%s\teffective\t%s\tshuffle\t%s"
+          % (args.picker, args.minimax_n, solver.effective_picker(),
+             "off" if args.no_shuffle else args.shuffle_seed))
     with open(args.metagraph) as handle:
         meta = json.load(handle)
     assert meta["miners"] == sorted(
