@@ -209,6 +209,27 @@ class Source(object):
         return sorted(rows, key=lambda r: r["_step"])
 
 
+def _backfill(src, name, args):
+    """The last rounds of one run that match, for the screen's first lines.
+
+    Returns (head_step, rounds, how many to show). A hotkey is queried on a
+    fraction of rounds, so it looks back further than the count wanted --
+    widening only if the first window is not enough.
+    """
+    head_step = int(src.runs[name]["run"].summary.get("_step") or 0)
+    want = max(0, args.backfill)
+    got = []
+    for span in (want if args.all else 300, 2000):
+        if not want:
+            break
+        rows = src.history(name, max(0, head_step + 1 - span), head_step + 1)
+        got = [r for r in rows
+               if args.all or args.hotkey in (r.get("miner_hotkeys") or [])]
+        if len(got) >= want:
+            break
+    return head_step, got, want
+
+
 # ------------------------------------------------------------------- main
 
 def main():
@@ -236,7 +257,21 @@ def main():
     api = wandb.Api(api_key=key, timeout=30)
 
     src = Source(api, args.validator)
-    if not src.discover():
+    # The first discovery is outside the poll loop's error handling, so one
+    # flaky W&B call here used to end the tool before it printed anything
+    # (seen 2026-09-19: ConnectTimeout to api.wandb.ai, fine on the retry).
+    # Keep trying: this is meant to run unattended for hours.
+    wait = 2.0
+    while True:
+        try:
+            src.discover()
+            break
+        except Exception as exc:        # noqa: BLE001 -- retried, never fatal
+            print("  [W&B not reachable (%s) -- retrying in %.0fs]"
+                  % (str(exc)[:100], wait), file=sys.stderr, flush=True)
+            time.sleep(wait)
+            wait = min(wait * 2, 60.0)
+    if not src.runs:
         # wait rather than exit: the loop rediscovers every REDISCOVER_S, so a
         # validator that comes back is picked up without restarting this
         print("  [no validator run has logged in the last %d h -- waiting for one]"
@@ -289,19 +324,13 @@ def main():
     # backfill: the last rounds that match, so the screen is never empty. The
     # `delay` on these is their age, and they are kept out of the delay stats.
     for name in src.runs:
-        head_step = int(src.runs[name]["run"].summary.get("_step") or 0)
-        want = max(0, args.backfill)
-        got = []
-        # A hotkey is queried on a fraction of rounds, so look back further
-        # than `want` -- widening only if the first window is not enough.
-        for span in (want if args.all else 300, 2000):
-            if not want:
-                break
-            rows = src.history(name, max(0, head_step + 1 - span), head_step + 1)
-            got = [r for r in rows
-                   if args.all or args.hotkey in (r.get("miner_hotkeys") or [])]
-            if len(got) >= want:
-                break
+        try:
+            head_step, got, want = _backfill(src, name, args)
+        except Exception as exc:        # noqa: BLE001 -- live following still works
+            print("  [backfill for %s skipped: %s]"
+                  % (src.runs[name]["validator"], str(exc)[:100]),
+                  file=sys.stderr, flush=True)
+            continue
         for raw in got[-want:] if want else []:
             emit(name, raw, live=False)
         last[name] = head_step
