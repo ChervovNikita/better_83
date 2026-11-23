@@ -26,20 +26,23 @@ import rounds as rounds_module
 import strategies
 from scoring import score
 
+# Tables a plan may enumerate before the round falls back to full sight. Set
+# from measured cost, not guessed: see sizing3.py.
+WALL_GUARD = float(os.environ.get("SN83_WALL_GUARD", "120"))
 
-def _probe_seconds(view, rnd, q):
-    """Returns the cost of evaluating one REPRESENTATIVE plan on this view.
 
-    Timing a plan like [1, 0, 0, ...] measures the cheapest possible candidate:
-    one distinct B-value means a tiny contingency table. The search spends its
-    time on plans that spread B over many cliques, where the number of distinct
-    (A count, B count) classes -- and so the table enumeration -- is far larger.
-    Probing the cheap shape underestimated by enough that rounds ran 858s
-    against a 300s deadline, so the probe now spreads q the way a real
-    candidate does.
+def _probe_work(view, q):
+    """Returns the table count one representative plan would enumerate.
+
+    Timing a probe made the affordability gate NON-DETERMINISTIC: the same
+    unchanged view measured 1.0e-5 to 3.2e-5 seconds depending on machine load,
+    so whether a round got the exact-partial or the full-sight opponent was a
+    wall-clock outcome, and rows were not reproducible between runs. The cost
+    driver is the contingency-table enumeration inside expected_scores, and its
+    size is a deterministic function of the plan, so count it instead.
     """
     sizes = sorted(view, reverse=True)
-    plan = {"fresh": []}
+    work = 0
     left = q
     for size in sizes:
         counts = view[size]["counts"]
@@ -47,16 +50,14 @@ def _probe_seconds(view, rnd, q):
             continue
         slots = len(counts)
         base, extra = divmod(left, slots)
-        plan[size] = (counts, [base + 1] * extra + [base] * (slots - extra))
+        assign = [base + 1] * extra + [base] * (slots - extra)
+        _va, _vb, tables = partial_module._prep(tuple(counts), tuple(assign))
+        work = max(work, 1) * max(1, len(tables))
         left = 0
-    if len(plan) == 1:
-        return 0.0
-    started = time.time()
-    native.expected_scores(plan, rnd.difficulty, rnd.omega)
-    return max(time.time() - started, 1e-9)
+    return work
 
 
-def play(rnd, g, o, cap, rng, strategy, deadline):
+def play(rnd, g, o, cap, rng, strategy, budget):
     """Returns one round's answer counts, means, and which solver replied."""
     q_a, q_b = rounds_module.split_queries(rnd, g, o)
     rnd.q_a, rnd.fleet_a, rnd.fleet_b = q_a, g, o
@@ -76,7 +77,7 @@ def play(rnd, g, o, cap, rng, strategy, deadline):
     # plan and multiply by the exact plan count, rather than assuming a rate.
     # A single candidate can outlast the deadline on its own, which is why the
     # in-search deadline alone could not bound the round.
-    probe = _probe_seconds(view, rnd, q_b)
+    work = _probe_work(view, q_b)
     # The cap only skips rounds too large to be worth starting; the deadline is
     # what actually bounds the run, and a missed deadline falls back to the
     # full-sight solver, which is the stronger opponent.
@@ -85,13 +86,14 @@ def play(rnd, g, o, cap, rng, strategy, deadline):
     # A single candidate can outlast the deadline on its own, and the in-search
     # check only fires BETWEEN candidates, so a slow per-candidate cost has to
     # disqualify the round outright rather than be amortised over the count.
-    affordable = (probe <= deadline / 1000.0
-                  and n_plans * probe <= deadline
+    # Deterministic: same round, same split, same decision on every machine.
+    affordable = (work <= budget // 1000
+                  and n_plans * work <= budget
                   and n_plans <= cap)
     if affordable:
         result = partial_module.best_response(
             view, rnd.difficulty, q_b, rnd.omega, fleet_a=g, fleet_b=o,
-            deadline=time.time() + deadline)
+            deadline=time.time() + WALL_GUARD)
     if result is not None:
         trial = partial_module.realise(result[1], rng)
         mean_a, mean_b = score(trial, rnd.difficulty)
@@ -108,7 +110,7 @@ def main():
     parser.add_argument("--g", type=int, required=True)
     parser.add_argument("--n", type=int, default=249)
     parser.add_argument("--cap", type=float, default=1e9)
-    parser.add_argument("--deadline", type=float, default=30.0)
+    parser.add_argument("--budget", type=float, default=1e6)
     parser.add_argument("--strategy", default="maximin")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
@@ -127,10 +129,12 @@ def main():
     # Shard by round, not by split: the near-even splits cost an order of
     # magnitude more than the lopsided ones, so one worker per split would be
     # bounded by the slowest split rather than by the total work.
+    assert 0 <= args.shard < args.nshards, (args.shard, args.nshards)
     mine = [r for i, r in enumerate(all_rounds) if i % args.nshards == args.shard]
+    assert mine, "shard selected no rounds"
     for index, rnd in enumerate(mine):
         rows.append(play(rnd, args.g, o, int(args.cap), rng, args.strategy,
-                         args.deadline))
+                         int(args.budget)))
         if (index + 1) % 25 == 0:
             done = sum(1 for r in rows if r[4] == "partial")
             sys.stderr.write("\r  %d/%d rounds, %d exact-partial (%.0f%%), "
@@ -145,7 +149,8 @@ def main():
                         % (args.strategy, args.g, args.shard))
     with open(path, "w") as handle:
         json.dump({"g": args.g, "o": o, "cap": args.cap,
-                   "strategy": args.strategy, "rows": rows}, handle)
+                   "strategy": args.strategy, "rows": rows,
+                   "budget": args.budget}, handle)
     covered = sum(1 for r in rows if r[4] == "partial")
     qa = sum(r[0] for r in rows)
     qb = sum(r[1] for r in rows)

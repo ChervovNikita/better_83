@@ -357,10 +357,18 @@ std::vector<std::vector<Entry>> neighbours(const std::vector<Entry>& board,
     if (board[i].a <= 0) continue;
     for (size_t j = 0; j < dests.size(); ++j) {
       if (j < board.size() && i == j) continue;
+      // dests holds the board plus up to TWO fresh slots (one per size class),
+      // so j can reach board.size() + 1 while trial only ever grows by one.
+      // Indexing trial by j then writes past the end and the hotkey taken off
+      // clique i is never re-placed, leaving a board short of the budget.
       std::vector<Entry> trial = board;
-      if (j >= board.size()) trial.push_back(dests[j]);
+      size_t target = j;
+      if (j >= board.size()) {
+        trial.push_back(dests[j]);
+        target = trial.size() - 1;
+      }
       trial[i].a -= 1;
-      trial[j].a += 1;
+      trial[target].a += 1;
       std::vector<Entry> kept;
       for (const auto& e : trial)
         if (e.a > 0) kept.push_back(e);

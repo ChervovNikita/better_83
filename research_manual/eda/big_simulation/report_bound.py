@@ -25,7 +25,12 @@ def sign_test(rows):
     n = up + down
     if not n:
         return up, down, 1.0
-    tail = sum(math.comb(n, k) for k in range(min(up, down) + 1)) / 2.0 ** n
+    # 2**n overflows a float at n >= 1024 and the real runs reach n ~ 500 per
+    # split and more when splits are merged, so accumulate in log space.
+    log_tail = [math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+                - n * math.log(2.0) for k in range(min(up, down) + 1)]
+    top = max(log_tail)
+    tail = math.exp(top) * sum(math.exp(v - top) for v in log_tail)
     return up, down, min(1.0, 2 * tail)
 
 

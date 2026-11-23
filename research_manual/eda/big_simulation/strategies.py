@@ -25,7 +25,10 @@ def estimate_q_b(rnd):
     lopsided splits p * fleet_b rounds to 0, and flooring at 1 made A defend
     against an opponent it does not expect to face.
     """
-    return max(0, int(round(selection_p(rnd.difficulty) * rnd.fleet_b)))
+    # split_queries floors the opponent's real count at 1, so estimating 0
+    # models an opponent that cannot occur and leaves A undefended at the
+    # extreme splits.
+    return max(1, int(round(selection_p(rnd.difficulty) * rnd.fleet_b)))
 
 
 def strategy(name):

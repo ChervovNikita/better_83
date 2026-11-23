@@ -188,30 +188,53 @@ def _all_replies(board, rnd, q):
 
 
 def main():
-    """Runs every check and prints the results."""
-    print("scoring vs fleet_sim        : max disagreement %.3g"
-          % check_scoring())
+    """Runs every check and prints the results, returning 1 if any failed."""
+    failures = []
+    worst_scoring = check_scoring()
+    print("scoring vs fleet_sim        : max disagreement %.3g" % worst_scoring)
+    if worst_scoring > 1e-9:
+        failures.append("scoring vs fleet_sim")
     bad, total, worst = check_optimal()
     print("full responder vs brute     : %d/%d below, worst %.9f"
           % (bad, total, worst))
+    if bad:
+        failures.append("full responder vs brute")
     bad, total, worst = check_optimal(60, 23, True)
     print("full responder, wide boards : %d/%d below, worst %.9f"
           % (bad, total, worst))
+    if bad:
+        failures.append("full responder, wide boards")
     bad, total, worst = check_partial()
     print("fast partial vs exhaustive  : %d/%d below, worst %.9f"
           % (bad, total, worst))
+    if bad:
+        failures.append("fast partial vs exhaustive")
     import native
     bad, total, worst, _f = check_optimal_grid(solver=native.best_response)
     print("C++ vs exhaustive grid      : %d/%d below, worst %.9f"
           % (bad, total, worst))
+    if bad:
+        failures.append("C++ vs exhaustive grid")
     bad, total, worst = check_prior_occupancy(solver=native.best_response)
     print("C++ on boards with prior B  : %d/%d below, worst %.9f"
           % (bad, total, worst))
+    if bad:
+        failures.append("C++ on boards with prior B")
     bad, total, worst = check_weighted()
     print("weighted best response      : %d/%d below, worst %.9f"
           % (bad, total, worst))
-    check_maximin()
-    check_bayes()
+    if bad:
+        failures.append("weighted best response")
+    mm_below, mm_short = check_maximin()
+    if mm_below:
+        failures.append("maximin vs every A board")
+    if mm_short:
+        failures.append("maximin returned %d UNDER-SPENDING boards" % mm_short)
+    if check_bayes():
+        failures.append("bayes vs every A board")
+    if failures:
+        print("FAILED: %s" % ", ".join(failures))
+        return 1
     return 0
 
 
@@ -316,7 +339,7 @@ def check_maximin(trials=400, seed=17):
     import strategies
     rng = random.Random(seed)
     worst = worst_start = 0.0
-    below = below_start = 0
+    below = below_start = short = 0
     for _ in range(trials):
         rnd = _fake_round(rng)
         rnd.n_top = rng.randint(1, 4)
@@ -333,7 +356,13 @@ def check_maximin(trials=400, seed=17):
             return w_a * ma - w_b * mb
 
         best = max(value(b) for b in _all_a_boards(rnd, q_a))
-        gap = best - value(native.maximin(rnd, q_a, q_b))
+        ours = native.maximin(rnd, q_a, q_b)
+        # An under-spending board is ILLEGAL, not merely suboptimal, and it can
+        # score ABOVE the legal optimum because a mean over fewer answers can be
+        # higher. Comparing values alone is structurally blind to it.
+        if sum(e[1] for e in ours) != q_a:
+            short += 1
+        gap = best - value(ours)
         if gap > 1e-9:
             below += 1
             worst = max(worst, gap)
@@ -345,6 +374,7 @@ def check_maximin(trials=400, seed=17):
           % (below, trials, worst))
     print("  (family start, no climb)  : %d/%d below, worst %.9f"
           % (below_start, trials, worst_start))
+    return below, short
 
 
 def check_bayes(trials=150, seed=29):
@@ -378,6 +408,7 @@ def check_bayes(trials=150, seed=29):
             worst = max(worst, gap)
     print("bayes vs every A board      : %d/%d below, worst %.9f"
           % (below, trials, worst))
+    return below
 
 
 if __name__ == "__main__":

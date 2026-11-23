@@ -43,8 +43,11 @@ def full_pooled(board, rnd, q, rng):
 def partial(board, rnd, q, rng):
     """Answers knowing only the occupancy multiset, then places at random."""
     view = build_view(board, rnd)
+    # Same pooled weighting as full_pooled: B maximises
+    # (q_b/fleet_b)*mean_b - (q_a/fleet_a)*mean_a, not the raw-count version.
     _gap, plan, _mean_a, _mean_b = partial_module.best_response_fast(
-        view, rnd.difficulty, q, rnd.omega)
+        view, rnd.difficulty, q, rnd.omega, fleet_a=rnd.fleet_a,
+        fleet_b=rnd.fleet_b)
     trial = partial_module.realise(plan, rng)
     mean_a, mean_b = score(trial, rnd.difficulty)
     return trial, mean_a, mean_b
